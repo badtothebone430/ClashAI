@@ -1780,3 +1780,9 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Chain (a):** same 100: v6lat 52 -> v6aug 74 -> clean obs 92.
 - **Risk:** v6aug's LIVE gate is shifted (5cs.98: 1.3% plays at tau 0.5 on live frames; 0.083 matched v6lat's live rate) -- live plays/min at 0.27 unmeasured.
 - **Proposed:** live run with `--student data\pipeline\s1_icebow_v6aug_s1.pt --student-gate-tau 0.27`, watch plays/min.
+
+## L67ao (2026-09-12) -- run19 v6aug live: not fewer plays, longer pauses; tau 0.24 = 0.27
+- **stdout, tau 0.27 (a):** v6lat 10.9 plays/min, 1% anti-stall, 27% of match time in >10 s pauses, longest 16-19 s; v6aug 12.2/min, 4% anti-stall, 35%, longest 22-26 s, >15 s pauses 0.64 vs 0.39/min.
+- **freeze captures (a):** v6lat 3 in 5 matches; v6aug 16 (0.27) and 31 (0.24) -- p median ~0.04 at those waits, elixir 8-10.
+- **video counter (a, ~10% high, calibrated on 20:29 stdout):** tau 0.24 12.4/min, 44% in >10 s pauses; tau 0.27 13.4/min, 36% -- no gain from 0.24.
+- **Proposed:** `play.stall_seconds: 8` (one change), v6aug at 0.27; save stdout with Tee-Object.
