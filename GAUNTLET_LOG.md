@@ -1786,3 +1786,9 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **freeze captures (a):** v6lat 3 in 5 matches; v6aug 16 (0.27) and 31 (0.24) -- p median ~0.04 at those waits, elixir 8-10.
 - **video counter (a, ~10% high, calibrated on 20:29 stdout):** tau 0.24 12.4/min, 44% in >10 s pauses; tau 0.27 13.4/min, 36% -- no gain from 0.24.
 - **Proposed:** `play.stall_seconds: 8` (one change), v6aug at 0.27; save stdout with Tee-Object.
+
+## L67ap (2026-09-12) -- run20 v6aug tau 0.24 (stdout saved): 9.9 plays/min, 49% of match time in >10 s pauses; stall_seconds 8 set
+- **Banner (a):** v6aug_s1, tau 0.24, anti-stall 9 elixir / 12 s; patched play.py running (CNN still present).
+- **Pauses (a, stdout):** v6lat 0.27 27% / v6aug 0.27 35% / v6aug 0.24 49% of match time in >10 s pauses; plays/min 10.9 / 12.2 / 9.9; anti-stall 1% / 4% / 5%.
+- **Read (b):** 0.24 vs 0.27 is most likely n=3 match variance; the gate sits at ~0.04 in the pauses, below both taus.
+- **Config (owner request):** `play.stall_seconds: 8` added to icebow/config/config.yaml (code default 12). Revert: delete the line.

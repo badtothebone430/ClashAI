@@ -1288,6 +1288,10 @@ env:
 
 # --- Running the trained policy live -------------------------------------
 play:
+  stall_seconds: 8             # L67ap (owner 2026-09-12): S1 student anti-stall fires after this many seconds without an
+                               # accepted play while elixir >= stall_elixir (9). Code default 12.0. v6aug live paused
+                               # 35-49% of match time in >10 s pauses vs v6lat's 27% (HANDOFF 5cs.99 AU/AV); this caps
+                               # those pauses. Revert: delete this line (or set 12).
   spell_target_mask: false     # LIVE: a spell may only be cast where spell_whiffed() says
                               # it would hit. Same criterion the live reward verifies casts
                               # with. OFF by default -- verify with a short live session.

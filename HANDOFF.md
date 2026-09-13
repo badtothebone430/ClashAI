@@ -3262,6 +3262,23 @@ The observation holds for X-Bow (10% -> 1%) and is refined for Rocket: **Rocket 
 
 *Proposed next (owner decision, one change):* fire the anti-stall sooner -- `play.stall_seconds: 8` under `play:` in `icebow/config/config.yaml` (code default 12.0, read at play.py `StudentPolicy(... stall_seconds=...)`; no CLI flag), keeping v6aug_s1 at tau 0.27; the pauses sit at 8-10 elixir, exactly what the rule caps. And save stdout next run: append `| Tee-Object -FilePath ..\scratchpad\live_run13.log` to the play command.
 
+**AV. L67ap -- RUN20 (owner 2026-09-12 23:30-23:40, v6aug_s1 tau 0.24, stdout SAVED) confirms AU: at tau 0.24 v6aug pauses even more (49% of match time inside >10 s pauses, 9.9 plays/min); the owner asked for `play.stall_seconds: 8`, now set in icebow/config/config.yaml.** Stdout `scratchpad/live_run13.log` (UTF-16; converted `L67/live_run20_utf8.log`), play log `icebow/data/play_20260912_233040.log`, clips `match_20260912_233047/233356/233719`. Output `L67/run20_plays_gaps.out`.
+
+*Banner (a).* "S1 STUDENT ON: s1_icebow_v6aug_s1.pt (epoch 12, grid lattice, gate tau 0.24, anti-stall 9 elixir / 12s) -- the student makes every play and every wait; the old policy only feeds the affordability masks" -- the L67an banner, so the patched play.py is the one running; `policy_rl.pt` was still present, so this was the CNN-present path (the no-CNN path is still unexercised live). No errors. 5 Frosty Fella presses.
+
+*Plays and pauses, stdout, same parser for all three (a).*
+| session | matches / min | plays/min | anti-stall | median gap | >10 s pauses/min | >15 s pauses/min | time in >10 s pauses | longest |
+|---|---|---|---|---|---|---|---|---|
+| v6lat_s0 tau 0.27 (15:22) | 4 / 12.8 | 10.9 | 1% | 4.3 s | 1.17 | 0.39 | 27% | 16-19 s |
+| v6aug_s1 tau 0.27 (20:29) | 3 / 12.4 | 12.2 | 4% | 3.5 s | 1.29 | 0.64 | 35% | 22-26 s |
+| **v6aug_s1 tau 0.24 (23:30)** | 3 / 9.6 | **9.9** | 5% | 4.2 s | **1.87** | 0.62 | **49%** | 19-28 s |
+
+Both tau 0.24 runs pause more than the tau 0.27 run (22:48 run by video: 44% vs the 0.27 clips' 36%; 23:30 by stdout: 49% vs 35%). A LOWER threshold should not play less, so this is most likely match/opponent variance at n = 3 matches, with no real tau effect -- consistent with the gate sitting at ~0.04 in the pauses (AU), below both taus. (b), untested at this sample size.
+
+*Config change (owner request, a).* `play.stall_seconds: 8` added at the top of the `play:` section of `icebow/config/config.yaml` with a comment (the key did not exist; `play.py` reads `cfg.get("play", "stall_seconds", default=12.0)` into `StudentPolicy`). Verified with `Config.load()`: `play.stall_seconds = 8`, `play.stall_elixir` unset (code default 9.0); `tests.test_live_capture_nav` + `tests.test_play_no_cnn` OK. hogeq unchanged. Revert: delete the line or set 12.
+
+*Proposed next.* One live run with stall_seconds 8, keeping tau as the owner chooses (0.24 and 0.27 are indistinguishable so far) and stdout saved; compare >10 s pause share and anti-stall share with this table, and read results.
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
