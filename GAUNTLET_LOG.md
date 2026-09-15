@@ -1792,3 +1792,10 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Pauses (a, stdout):** v6lat 0.27 27% / v6aug 0.27 35% / v6aug 0.24 49% of match time in >10 s pauses; plays/min 10.9 / 12.2 / 9.9; anti-stall 1% / 4% / 5%.
 - **Read (b):** 0.24 vs 0.27 is most likely n=3 match variance; the gate sits at ~0.04 in the pauses, below both taus.
 - **Config (owner request):** `play.stall_seconds: 8` added to icebow/config/config.yaml (code default 12). Revert: delete the line.
+
+## L67aq (2026-09-15) -- strategy research (Fable Foreman, 4 scouts): what S1 sees, what engine/live can supply, why beyond-imitation attempts failed
+- **S1 live (a):** unit HP constant 1.0, king HP 1.0, princess tower HP real, no movement/status/range/targets; clean training rows DO carry exact unit HP (train/live mismatch).
+- **Unused live readers (a):** HP bars (detect_obs.read_hp_frac, accuracy unmeasured), velocity (TeamTracker), effect-zone detector classes.
+- **Engine (a):** hp, targets, attack timing, movement direction; status buffs only as an UNVERIFIED export; no save/restore.
+- **Failure causes (a):** sim fidelity, CNN underfit, gate collapse, damage-only greedy search objective, privileged-teacher gap.
+- **Proposed (b):** degrade-component attribution screen -> measure live readers -> S1 v7 with live-matched noisy features -> asymmetric actor-critic / search-DAgger with a learned value.
