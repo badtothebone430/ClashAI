@@ -1799,3 +1799,13 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Engine (a):** hp, targets, attack timing, movement direction; status buffs only as an UNVERIFIED export; no save/restore.
 - **Failure causes (a):** sim fidelity, CNN underfit, gate collapse, damage-only greedy search objective, privileged-teacher gap.
 - **Proposed (b):** degrade-component attribution screen -> measure live readers -> S1 v7 with live-matched noisy features -> asymmetric actor-critic / search-DAgger with a learned value.
+
+
+## L67as (2026-09-15) -- step 2 live reader audit: HP-bar reader unusable (3.6%), velocity usable (89%); engine attribution chain launched
+- **RETRACTION (c):** AW proposal (3) put unit HP first on the S1 v7 feature list. `detect_obs.read_hp_frac` returns a bar on **3.6% of detections** (n=9,628), **22.7% of tracks** (n=643). No error to model -- it is a detector project, not a wiring job.
+- **HP where it fires (a):** at-deploy first read median 1.000, 97.3% >= 0.90, 0.9% < 0.70 (112/166 plays matched); jitter median 0.000 (n=51).
+- **HP anomaly (a, unexplained):** 20.2% of consecutive found-read pairs INCREASE by >0.10 (n=178) in decks with no heals -- reader noise or track-identity swap; audit cannot separate.
+- **Velocity (a):** 89.0% of tracks report a velocity; per-class speed overshoots card constants by a consistent **1.08-1.20x across ~15 classes** (shared warp bias, `TILE_X/TILE_Y` vs `actions.BoardWarp`); heading median |angle change| **43.7 deg** (n=5,365) = unusable unsmoothed; stationary buildings read 0.30-0.41 tiles/s (jitter floor).
+- **Charge lead (b):** prince 2.01x, dark_prince 1.63x, mega_knight 1.57x, goblin_giant 1.50x, battle_ram 1.37x sit above the bias cluster -- a derived charging flag from data already computed. Confounded by lava_hound 1.38x and the unquantified warp bias.
+- **v7 order changes (b):** velocity in, unit HP out; static card stats need no reader.
+- **Launched:** `chain_noise_attrib.ps1` (step 1) -- 2 gates + 7 single-component `--noise-off` arms x 100 held-out entries, v6lat_s0, live rule.
