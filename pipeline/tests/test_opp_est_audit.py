@@ -39,9 +39,10 @@ from pipeline import vocab                                            # noqa: E4
 from pipeline.e1_pool import POOL_V1, load_pool_v1, select_split      # noqa: E402
 from pipeline.obs_contract import Unit, _phase, load_deck             # noqa: E402
 from pipeline.opp_est_audit import (                                  # noqa: E402
-    TrackedEstimator, _Det, b5_seed, card_cost, dets_of_costed, dets_of_whitelisted, ghost_delivered_by_base,
-    ghost_scripted_by_base, is_policy_tick, load_detector_cards, mae, mean_bias, merge_base_ledgers,
-    opp_play_flags, overcharge_table, percentile, phase_from_flags, phase_of, share_within, summarize_condition,
+    TrackedEstimator, TracedEstimator, _Det, b5_seed, card_cost, charge_diagnostics, classify_charge_reason,
+    dets_of_costed, dets_of_whitelisted, ghost_delivered_by_base, ghost_scripted_by_base, is_policy_tick,
+    load_detector_cards, mae, mean_bias, merge_base_ledgers, opp_play_flags, overcharge_table, percentile,
+    phase_from_flags, phase_of, run_traced_update, share_within, summarize_condition,
 )
 
 from clashrl.cards import CardDB                                      # noqa: E402
@@ -514,6 +515,129 @@ class TestOvercharge(unittest.TestCase):
         self.assertEqual(oc["top"], [])
         self.assertEqual(oc["total_charged_elixir"], 0.0)
         self.assertIsNone(oc["over_charge_share_from_bases_never_played"])   # 0/0 -- None, not a ZeroDivisionError
+
+
+# ------------------------------------------------------------------------------------------------------
+# (xiii) TICKET O10: charge-event trace -- TracedEstimator / run_traced_update against synthetic dets, no
+# engine. The three ticket-mandated scenarios (stationary/first_seen, jump/rebill_out_of_radius,
+# expire-then-reappear/rebill_after_expiry), plus TracedEstimator parity with plain TrackedEstimator.
+# ------------------------------------------------------------------------------------------------------
+class TestChargeTraceStationaryFirstSeen(unittest.TestCase):
+    def test_three_samples_0_25s_apart_one_charge_zero_expiries(self):
+        est = TracedEstimator(_FakeDB(4.0))
+        est.reset(my_elixir=10.0, now=0.0)
+        t_to_tick: dict = {}
+        all_charges: list = []
+        all_tracks: list = []
+        prev_dets, prev_t = None, None
+        for i, t in enumerate((0.0, 0.25, 0.5)):
+            det = _Det(base="tombstone", cx=0.4, gy=0.6, team="enemy")
+            ch, tr = run_traced_update(est, 10.0, [det], t, tick=i * 5, tag="m1", k=0,
+                                       prev_dets=prev_dets, prev_t=prev_t, t_to_tick=t_to_tick)
+            all_charges.extend(ch)
+            all_tracks.extend(tr)
+            prev_dets, prev_t = [det], t
+        self.assertEqual(len(all_charges), 1, all_charges)
+        self.assertEqual(all_charges[0]["reason"], "first_seen")
+        self.assertEqual(all_charges[0]["base"], "tombstone")
+        self.assertEqual(all_charges[0]["cost"], 4.0)
+        self.assertEqual(all_charges[0]["prev_n_same_base"], 0)
+        self.assertFalse(all_charges[0]["same_base_track_existed_before"])
+        self.assertIsNone(all_charges[0]["dt_since_prev_sample_s"])   # first sample of the match
+        self.assertEqual(all_tracks, [])   # zero track_events -- the track never aged past forget_s
+
+
+class TestChargeTraceJumpRebillOutOfRadius(unittest.TestCase):
+    def test_jump_0_2_in_x_produces_second_charge_rebill_out_of_radius(self):
+        est = TracedEstimator(_FakeDB(3.0))
+        est.reset(my_elixir=10.0, now=0.0)
+        t_to_tick: dict = {}
+        det1 = _Det(base="miner", cx=0.5, gy=0.5, team="enemy")
+        ch1, tr1 = run_traced_update(est, 10.0, [det1], 0.0, tick=0, tag="m1", k=0,
+                                     prev_dets=None, prev_t=None, t_to_tick=t_to_tick)
+        self.assertEqual(len(ch1), 1)
+        self.assertEqual(ch1[0]["reason"], "first_seen")
+
+        det2 = _Det(base="miner", cx=0.7, gy=0.5, team="enemy")     # jumped 0.2 in x -- > match_radius=0.07
+        ch2, tr2 = run_traced_update(est, 10.0, [det2], 0.25, tick=5, tag="m1", k=0,
+                                     prev_dets=[det1], prev_t=0.0, t_to_tick=t_to_tick)
+        self.assertEqual(len(ch2), 1, ch2)
+        row = ch2[0]
+        self.assertEqual(row["reason"], "rebill_out_of_radius")
+        self.assertEqual(row["prev_n_same_base"], 1)
+        self.assertAlmostEqual(row["prev_same_base_min_dist"], 0.2, places=4)
+        self.assertFalse(row["prev_same_base_within_match_radius"])
+        self.assertTrue(row["same_base_track_existed_before"])
+        self.assertAlmostEqual(row["dt_since_prev_sample_s"], 0.25, places=4)
+        self.assertEqual(tr2, [])   # the old track was never expired (age 0.25 <= forget_s=6.0), just missed
+
+
+class TestChargeTraceExpiryRebillAfterExpiry(unittest.TestCase):
+    def test_absent_7s_then_present_produces_expiry_and_rebill_after_expiry(self):
+        est = TracedEstimator(_FakeDB(2.0))
+        est.reset(my_elixir=10.0, now=0.0)
+        t_to_tick: dict = {}
+        det = _Det(base="witch", cx=0.3, gy=0.3, team="enemy")
+        ch1, tr1 = run_traced_update(est, 10.0, [det], 0.0, tick=0, tag="m1", k=0,
+                                     prev_dets=None, prev_t=None, t_to_tick=t_to_tick)
+        self.assertEqual(ch1[0]["reason"], "first_seen")
+        self.assertEqual(tr1, [])
+
+        # next OBSERVED sample is 7.0s later (unit absent from every intervening sample this test skips
+        # feeding, i.e. never detected in between) -- forget_s=6.0 means the track is stale by then, and the
+        # real _seen_tracks (opponent_elixir.py:42-43) removes it INSIDE this same update() call, before the
+        # reappearing det is matched against it.
+        det_again = _Det(base="witch", cx=0.3, gy=0.3, team="enemy")   # same spot -- stationary building
+        ch2, tr2 = run_traced_update(est, 10.0, [det_again], 7.0, tick=140, tag="m1", k=0,
+                                     prev_dets=[det], prev_t=0.0, t_to_tick=t_to_tick)
+        self.assertEqual(len(tr2), 1, tr2)
+        self.assertEqual(tr2[0]["base"], "witch")
+        self.assertAlmostEqual(tr2[0]["age_s"], 7.0, places=4)
+        self.assertEqual(tr2[0]["last_seen_tick"], 0)      # resolved via t_to_tick, set at tick=0's call
+
+        self.assertEqual(len(ch2), 1, ch2)
+        row = ch2[0]
+        self.assertEqual(row["reason"], "rebill_after_expiry")
+        self.assertTrue(row["same_base_track_existed_before"])   # true BEFORE this update's own expiry
+        self.assertEqual(row["prev_n_same_base"], 1)              # stationary -- also seen in prev sample
+        self.assertAlmostEqual(row["prev_same_base_min_dist"], 0.0, places=6)
+
+
+class TestChargeTraceOffProducesNoTrace(unittest.TestCase):
+    def test_charge_trace_false_path_uses_plain_update_no_trace_helpers_needed(self):
+        """Sanity check for the --charge-trace OFF path: run_match_audit's est_a stays a plain
+        TrackedEstimator (no last_charges/last_expired) when charge_trace=False -- verified here at the
+        estimator-selection unit, since run_match_audit itself needs a live engine to exercise end to end."""
+        est_off = TrackedEstimator(_FakeDB(3.0))
+        self.assertFalse(hasattr(est_off, "last_charges"))
+        self.assertFalse(hasattr(est_off, "last_expired"))
+        est_on = TracedEstimator(_FakeDB(3.0))
+        self.assertTrue(hasattr(est_on, "last_charges"))
+        self.assertTrue(hasattr(est_on, "last_expired"))
+
+
+class TestTracedEstimatorParityWithTrackedEstimator(unittest.TestCase):
+    def test_same_sequence_of_updates_yields_identical_est_and_charged_by_base(self):
+        """CONSTRAINT: 'no change to opponent_elixir.py semantics; the wrapper must call the real
+        update()/_seen_tracks so condition A's numbers are unchanged.' Feeds the identical sequence of dets
+        to a TrackedEstimator and a TracedEstimator and asserts identical numeric outcomes."""
+        seq = [
+            (10.0, [_Det("knight", 0.5, 0.3, "enemy")], 0.0),
+            (10.0, [_Det("knight", 0.505, 0.302, "enemy")], 0.25),          # refresh, within match_radius
+            (10.0, [_Det("knight", 0.9, 0.3, "enemy"), _Det("archers", 0.1, 0.3, "enemy")], 0.5),
+            (10.0, [], 8.0),                                                # gap -- lets knight's track expire
+            (10.0, [_Det("knight", 0.9, 0.3, "enemy")], 8.25),
+        ]
+        base = TrackedEstimator(_FakeDB(2.0))
+        traced = TracedEstimator(_FakeDB(2.0))
+        base.reset(my_elixir=10.0, now=0.0)
+        traced.reset(my_elixir=10.0, now=0.0)
+        for my_elx, dets, now in seq:
+            base.update(my_elx, dets, now)
+            traced.update(my_elx, dets, now)
+        self.assertAlmostEqual(base._est, traced._est)
+        self.assertEqual(base.charged_by_base, traced.charged_by_base)
+        self.assertEqual(base._opp_spent, traced._opp_spent)
 
 
 if __name__ == "__main__":

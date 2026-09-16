@@ -131,11 +131,41 @@ NOTE (no fix needed, flagged by the verifier): ``--max-ticks`` truncates each ma
 
     icebow/.venv/Scripts/python.exe -m pipeline.opp_est_audit --port 38032 --ckpt <pt> --split heldout ^
         --entries 0:2 --max-ticks 600 --out scratchpad/gauntlet/L67/opp_est/smoke
+
+TICKET O10 -- charge-event TRACE (no fix; instrumentation only). ATTEMPT 4's over-charge tables (real audit,
+condition A) found continuously-visible SINGLE units re-billed many times over (tombstone: 58 delivered plays
+-> 442 charges; miner 28 -> 201; witch 16 -> 142) despite ``_find_track`` (opponent_elixir.py:101-105)
+appearing, by reading, to refresh a matched track's timestamp every update rather than re-charging it. This
+adds ``--charge-trace``: for condition A ONLY, ``<out>/charges.jsonl`` (one row per actual ``_opp_spent``
+increment, with the diagnostics needed to tell WHY the charge happened) and ``<out>/track_events.jsonl`` (one
+row per track EXPIRY, i.e. every base ``_seen_tracks`` -- opponent_elixir.py:42-43 -- actually removes).
+
+``TracedEstimator(TrackedEstimator)`` gets both WITHOUT re-implementing any tracking/matching/clustering
+logic and WITHOUT touching opponent_elixir.py: it overrides ``_seen_tracks`` to diff ``self._tracks``
+before/after the real (unmodified) ``super()._seen_tracks(now)`` call -- the ticket's own "diff before/after"
+option, chosen over "replicate the same filter" because a diff can never drift from the real ``forget_s``
+comparison if that constant or the comparison operator ever changes. ``update()`` snapshots ``self._tracks``
+by object identity BEFORE calling ``super().update()`` (which runs the real, unmodified expiry -> match ->
+cluster -> charge pipeline), then reads off which tracks in the POST-update list are new objects (never
+mutated in place, only ever created fresh inside ``_cluster_new``'s loop, opponent_elixir.py:107-108) and
+zips them 1:1, in order, against ``TrackedEstimator``'s own ``_RecorderDB`` call list (order-preserved because
+both the ``self._tracks.append(...)`` and the ``self.db.elixir(base)`` call sit in the SAME loop iteration,
+opponent_elixir.py:107-111) to recover (base, x, y, cost) for every actual charge, cost > 0 only, mirroring
+``charged_by_base``'s own gate exactly.
+
+Per-charge diagnostics are computed by the harness (``charge_diagnostics``), never inside the estimator, from
+two things the estimator itself does not remember past one call: the PREVIOUS sample's det list (caller-
+tracked, one match at a time) and the pre-update track snapshot ``TracedEstimator.update`` already captured
+for its own bookkeeping. ``classify_charge_reason`` turns those into a best-effort ``reason`` string; see the
+module's inline comment on that function for the one place its evaluation order deliberately departs from the
+ticket text's literal listing order (and why -- the "rebill_after_expiry" acceptance scenario forces it).
+Full writeup: scratchpad/gauntlet/L67/opp_fix/O10_trace.md.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 import time
@@ -297,6 +327,9 @@ class TrackedEstimator(OpponentElixirEstimator):
     def __init__(self, db):
         super().__init__(db)
         self.charged_by_base: dict[str, list] = {}   # base -> [n_charges, total_elixir_charged]
+        self.last_calls: list[tuple[str, Optional[float]]] = []   # O10: this update() call's raw db.elixir()
+                                                                    # calls (base, cost), in _cluster_new order --
+                                                                    # read-only bookkeeping, no behavior change.
 
     def update(self, my_elixir, enemy_dets, now):
         real_db = self.db
@@ -312,7 +345,136 @@ class TrackedEstimator(OpponentElixirEstimator):
                 row = self.charged_by_base.setdefault(base, [0, 0.0])
                 row[0] += 1
                 row[1] += cf
+        self.last_calls = calls        # O10: exposed so TracedEstimator can pair (base, cost) with new tracks
         return result
+
+
+# ------------------------------------------------------------------------------------------------------
+# TICKET O10: charge-event / track-expiry trace -- see module docstring for the full design rationale.
+# ------------------------------------------------------------------------------------------------------
+class TracedEstimator(TrackedEstimator):
+    """``TrackedEstimator`` plus two mechanical, read-only observations of the SAME unmodified super() calls:
+    ``last_charges`` (this update() call's newly-tracked, cost > 0 bases with (x, y, cost, n_tracks_before,
+    n_tracks_after)) and ``last_expired`` (this update() call's track EXPIRIES, i.e. every track
+    ``_seen_tracks`` actually dropped). Neither re-implements matching/clustering/forgetting -- both are
+    diffs of ``self._tracks`` around the real, unmodified super() calls, by object identity (track dicts are
+    mutated in place when refreshed, and are only ever created fresh by ``_cluster_new``'s loop, so identity
+    alone tells 'refreshed' from 'new' or 'gone' correctly)."""
+
+    def __init__(self, db):
+        super().__init__(db)
+        self.last_charges: list[dict] = []
+        self.last_expired: list[dict] = []
+
+    def _seen_tracks(self, now: float) -> None:
+        before = list(self._tracks)
+        super()._seen_tracks(now)                      # the REAL, unmodified forget_s filter
+        kept_ids = {id(tr) for tr in self._tracks}
+        self.last_expired = [
+            {"base": tr["base"], "x": tr["x"], "y": tr["y"], "age_s": float(now) - float(tr["t"]),
+             "last_seen_t": float(tr["t"])}
+            for tr in before if id(tr) not in kept_ids
+        ]
+
+    def update(self, my_elixir, enemy_dets, now):
+        tracks_before = list(self._tracks)             # BEFORE this call's _seen_tracks/match/cluster/charge
+        before_ids = {id(tr) for tr in tracks_before}
+        n_before = len(tracks_before)
+        result = super().update(my_elixir, enemy_dets, now)   # real _seen_tracks (via our override above) +
+                                                                 # real match/cluster/charge (via TrackedEstimator)
+        new_tracks = [tr for tr in self._tracks if id(tr) not in before_ids]   # _cluster_new append order
+        n_after = len(self._tracks)
+        charges = []
+        for tr, (base, cost) in zip(new_tracks, self.last_calls):
+            cf = float(cost or 0.0)
+            if cf > 0.0:                                # same charge gate as charged_by_base
+                charges.append({"base": tr["base"], "x": tr["x"], "y": tr["y"], "cost": cf,
+                                "n_tracks_before": n_before, "n_tracks_after": n_after})
+        self.last_charges = charges
+        return result
+
+
+def _dist(ax: float, ay: float, bx: float, by: float) -> float:
+    return math.hypot(ax - bx, ay - by)
+
+
+def charge_diagnostics(base: str, x: float, y: float, prev_dets: Optional[list], tracks_before: list[dict],
+                       match_radius: float, cluster_radius: float) -> dict:
+    """O10 (b): the diagnostic fields computed by the HARNESS (never inside the estimator) from the PREVIOUS
+    sample's dets and the pre-update track snapshot ``TracedEstimator.update`` already took."""
+    prev_same = [d for d in (prev_dets or [])
+                if str(getattr(d, "team", None)) == "enemy" and str(getattr(d, "base", "")) == base]
+    prev_dists = [_dist(float(d.cx), float(d.gy), x, y) for d in prev_same]
+    prev_min = min(prev_dists) if prev_dists else None
+    track_same = [tr for tr in tracks_before if tr["base"] == base]
+    track_dists = [_dist(float(tr["x"]), float(tr["y"]), x, y) for tr in track_same]
+    track_min = min(track_dists) if track_dists else None
+    return {
+        "prev_same_base_within_match_radius": bool(prev_min is not None and prev_min <= match_radius),
+        "prev_same_base_min_dist": (round(prev_min, 4) if prev_min is not None else None),
+        "prev_n_same_base": len(prev_same),
+        "same_base_track_existed_before": bool(track_same),
+        "nearest_track_same_base_dist": (round(track_min, 4) if track_min is not None else None),
+    }
+
+
+def classify_charge_reason(base: str, diag: dict, expired_bases_this_update: set, match_radius: float,
+                           cluster_radius: float) -> str:
+    """O10 (c): best-effort classification from ``charge_diagnostics`` + this SAME update() call's
+    track_events (``expired_bases_this_update``, from ``TracedEstimator.last_expired``).
+
+    DEVIATION FROM THE TICKET TEXT'S LITERAL LISTING ORDER (first_seen, split, rebill_after_expiry,
+    rebill_out_of_radius, other), flagged in the progress file and hand-back: this checks
+    rebill_after_expiry BEFORE split. The ticket's own acceptance scenario -- a unit absent 7s then
+    reappearing at (or near) its old, stationary position -- is simultaneously <= cluster_radius of its own
+    previous-sample detection (it never moved) AND had a live track before this update, so under the literal
+    a/b/c/d order it would hit 'split' first and never reach 'rebill_after_expiry', contradicting that same
+    acceptance test. Checking the expiry cross-reference first resolves this in the direction the acceptance
+    test requires, and is the more causally direct story (the track was PROVABLY just removed this exact
+    update) versus a merely coincidental positional match. All raw diagnostic fields are kept on every row
+    regardless, so the lead can re-derive any other ordering they prefer."""
+    if diag["prev_n_same_base"] == 0 and not diag["same_base_track_existed_before"]:
+        return "first_seen"
+    if diag["same_base_track_existed_before"] and base in expired_bases_this_update:
+        return "rebill_after_expiry"
+    if (diag["prev_same_base_min_dist"] is not None and diag["prev_same_base_min_dist"] <= cluster_radius
+            and diag["same_base_track_existed_before"]):
+        return "split"
+    if diag["prev_n_same_base"] > 0 and (diag["prev_same_base_min_dist"] is None
+                                         or diag["prev_same_base_min_dist"] > match_radius):
+        return "rebill_out_of_radius"
+    return "other"
+
+
+def run_traced_update(est: TracedEstimator, my_elixir: float, dets: list, now: float, tick: int, tag: str,
+                      k: int, prev_dets: Optional[list], prev_t: Optional[float], t_to_tick: dict
+                      ) -> tuple[list[dict], list[dict]]:
+    """One condition-A ``TracedEstimator.update()`` cycle with tracing: calls the real (unmodified) update(),
+    then builds this call's charge rows (module docstring O10 (a)/(b)/(c)) and track-event rows from
+    ``est.last_charges``/``est.last_expired`` plus ``prev_dets`` (the PREVIOUS sample's det list for this
+    match, caller-tracked) and ``t_to_tick`` (this match's t_sec -> tick map, caller-updated every sample so
+    a track's stored ``t`` -- always some earlier call's ``now`` -- can be resolved back to a tick)."""
+    tracks_before = [dict(tr) for tr in est._tracks]        # value snapshot, immune to later in-place mutation
+    t_to_tick[float(now)] = int(tick)
+    est.update(my_elixir, dets, now)
+    expired_bases = {ex["base"] for ex in est.last_expired}
+    match_radius, cluster_radius = est.match_radius, est.cluster_radius
+    charge_rows = []
+    for ch in est.last_charges:
+        diag = charge_diagnostics(ch["base"], ch["x"], ch["y"], prev_dets, tracks_before,
+                                  match_radius, cluster_radius)
+        reason = classify_charge_reason(ch["base"], diag, expired_bases, match_radius, cluster_radius)
+        dt = (round(float(now) - float(prev_t), 4) if prev_t is not None else None)
+        charge_rows.append({"tag": tag, "k": int(k), "tick": int(tick), "t_sec": round(float(now), 3),
+                            "base": ch["base"], "cost": ch["cost"], "x": ch["x"], "y": ch["y"],
+                            "n_tracks_before": ch["n_tracks_before"], "n_tracks_after": ch["n_tracks_after"],
+                            "reason": reason, "dt_since_prev_sample_s": dt, **diag})
+    track_rows = []
+    for ex in est.last_expired:
+        track_rows.append({"tag": tag, "k": int(k), "tick": int(tick), "base": ex["base"], "x": ex["x"],
+                           "y": ex["y"], "age_s": round(float(ex["age_s"]), 4),
+                           "last_seen_tick": t_to_tick.get(ex["last_seen_t"])})
+    return charge_rows, track_rows
 
 
 def _base_of_slug(slug: str) -> str:
@@ -499,12 +661,16 @@ def summarize_condition(rows: list[dict], est_key: str) -> dict:
 # one match, three conditions, per-tick rows at STEP_TICKS cadence
 # ------------------------------------------------------------------------------------------------------
 def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict,
-                    warned_costless: Optional[set] = None, whitelist: Optional[frozenset] = None
-                    ) -> tuple[list[dict], dict]:
+                    warned_costless: Optional[set] = None, whitelist: Optional[frozenset] = None,
+                    charge_trace: bool = False) -> tuple[list[dict], dict, list[dict], list[dict]]:
     """Mirrors e1_eval.run_match's while-loop (same live policy, same accepted-play bookkeeping, IDENTICAL
     decisions at IDENTICAL ticks) but steps the engine STEP_TICKS at a time, updates all four estimators
     every step, and records a per-tick truth/estimate row instead of only a match summary. Returns
-    (ticks, match_summary). ``whitelist``: FIX 4's ``load_detector_cards()`` result, required for A_wl."""
+    (ticks, match_summary, charge_rows, track_event_rows) -- the last two are always [] unless
+    ``charge_trace`` is set, in which case condition A's estimator becomes a ``TracedEstimator`` (module
+    docstring O10) and they carry this match's charge / track-expiry trace rows; every other condition
+    (A+, A_wl, B) is untouched regardless of this flag. ``whitelist``: FIX 4's ``load_detector_cards()``
+    result, required for A_wl."""
     if warned_costless is None:
         warned_costless = set()
     if whitelist is None:
@@ -527,12 +693,21 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     last_play_tick: Optional[int] = None
     first_tick: Optional[int] = None
     est_ap = TrackedEstimator(db)      # A+  : units + spells, engine truth, no whitelist
-    est_a = TrackedEstimator(db)       # A   : units only, engine truth, no whitelist (loose upper bound)
+    # O10: condition A ONLY becomes a TracedEstimator when --charge-trace is set; TrackedEstimator otherwise,
+    # byte-identical to before the flag existed (TracedEstimator IS-A TrackedEstimator, so est_a._est/
+    # est_a.charged_by_base are unaffected either way -- only the extra last_charges/last_expired bookkeeping
+    # is new, and nothing reads it unless charge_trace is True).
+    est_a = TracedEstimator(db) if charge_trace else TrackedEstimator(db)   # A: units only, no whitelist
     est_wl = TrackedEstimator(db)      # A_wl: units only, engine truth, live's detector_cards whitelist (FIX 4)
     est_b = TrackedEstimator(db)       # B   : units only, degraded live-like view
     inited = False
     prev_truth: Optional[float] = None
     ticks: list[dict] = []
+    charge_rows: list[dict] = []       # O10: condition A's charge trace (only ever populated if charge_trace)
+    track_event_rows: list[dict] = []  # O10: condition A's track-expiry trace (ditto)
+    prev_a_dets: Optional[list] = None # O10: PREVIOUS sample's condition-A det list, for charge_diagnostics
+    prev_a_t: Optional[float] = None   # O10: PREVIOUS sample's t_sec, for dt_since_prev_sample_s
+    t_to_tick: dict = {}                # O10: this match's t_sec -> tick map, for track_events' last_seen_tick
     n_dec = n_acc = 0
     max_ticks = int(cfg.get("max_ticks") or 0)
     done = False
@@ -569,7 +744,15 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         est_ap_val = float(est_ap._est)
         n_ap = n_enemy(bs.units) + n_enemy(bs.spells)
 
-        est_a.update(bs.my_elixir, dets_of(bs.units), bs.t_sec)
+        a_dets = dets_of(bs.units)
+        if charge_trace:
+            ch_rows, tr_rows = run_traced_update(est_a, bs.my_elixir, a_dets, bs.t_sec, tick, tag, k,
+                                                 prev_a_dets, prev_a_t, t_to_tick)
+            charge_rows.extend(ch_rows)
+            track_event_rows.extend(tr_rows)
+            prev_a_dets, prev_a_t = a_dets, bs.t_sec
+        else:
+            est_a.update(bs.my_elixir, a_dets, bs.t_sec)
         est_a_val = float(est_a._est)
         n_a = n_enemy(bs.units)
 
@@ -650,7 +833,7 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
               "ghost_scripted_by_base": ghost_scripted,           # reference only -- NOT used for over-charge
               "ghost_delivered_by_base": ghost_delivered,         # the truth ledger over-charge actually uses
               "over_charge_at_end": over_charge_at_end}
-    return ticks, summary
+    return ticks, summary, charge_rows, track_event_rows
 
 
 # ------------------------------------------------------------------------------------------------------
@@ -680,6 +863,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "the run (smoke); 0 = unlimited. SMOKE ONLY: truncates each match mid-flight, then "
                     "_outcome() is computed on a NON-terminal engine state (outcome/crowns are meaningless "
                     "for a truncated match; ticks/estimates up to the cut are still valid)")
+    ap.add_argument("--charge-trace", action="store_true", help="O10: for condition A ONLY, write "
+                    "<out>/charges.jsonl (one row per _opp_spent charge, with diagnostics + a best-effort "
+                    "reason) and <out>/track_events.jsonl (one row per track expiry). No fix -- "
+                    "instrumentation only; off by default and produces no new files / no summary change.")
     ap.add_argument("--out", type=Path, required=True)
     return ap
 
@@ -722,6 +909,11 @@ def main(argv=None) -> int:
                       "estimator_step": cfg["estimator_step"], "n_detector_cards": len(whitelist)}), flush=True)
 
     tick_path = out / "ticks.jsonl"
+    charge_trace = bool(a.charge_trace)
+    # O10: charges.jsonl / track_events.jsonl are ONLY ever created when --charge-trace is passed -- off by
+    # default means no new files at all, per the ticket.
+    charges_fh = (out / "charges.jsonl").open("a", encoding="utf-8") if charge_trace else None
+    track_events_fh = (out / "track_events.jsonl").open("a", encoding="utf-8") if charge_trace else None
     all_rows: list[dict] = []
     match_summaries: list[dict] = []
     warned_costless: set = set()
@@ -737,14 +929,22 @@ def main(argv=None) -> int:
             for (i, k) in tasks:
                 entry = entries[i]
                 try:
-                    match_rows, msummary = run_match_audit(env, model, deck, db, entry, k, cfg, warned_costless,
-                                                            whitelist)
+                    match_rows, msummary, ch_rows, tr_rows = run_match_audit(
+                        env, model, deck, db, entry, k, cfg, warned_costless, whitelist,
+                        charge_trace=charge_trace)
                 except Exception as exc:
                     print(f"[opp_est_audit] ERROR on {entry['tag']} k={k}: {exc!r}", flush=True)
                     return 3
                 for row in match_rows:
                     fh.write(json.dumps(row) + "\n")
                 fh.flush()
+                if charge_trace:
+                    for row in ch_rows:
+                        charges_fh.write(json.dumps(row) + "\n")
+                    for row in tr_rows:
+                        track_events_fh.write(json.dumps(row) + "\n")
+                    charges_fh.flush()
+                    track_events_fh.flush()
                 all_rows.extend(match_rows)
                 match_summaries.append(msummary)
                 total_ticks += len(match_rows)
@@ -755,6 +955,10 @@ def main(argv=None) -> int:
     finally:
         if env is not None:
             env.close()
+        if charges_fh is not None:
+            charges_fh.close()
+        if track_events_fh is not None:
+            track_events_fh.close()
 
     conds = (("Aplus_perfect_detection_with_spells", "est_Aplus", "Aplus"),
              ("A_perfect_detection", "est_A", "A"), ("A_wl_live_whitelist", "est_Awl", "A_wl"),
