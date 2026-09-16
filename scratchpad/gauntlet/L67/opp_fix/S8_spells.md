@@ -18,9 +18,10 @@ scout's own total, ~630, undercounted). Citations are the scout's; (verified) = 
 ## 2. Whitelist mechanics — play.py:547, vocab.py:110-120
 - play.py:547 compares `d.base` (base_key-stripped), not the raw class. `base_key` strips _ability,
   _hero, _evo, _aoe iteratively → `poison_aoe` → `poison`. A whitelist entry `poison` passes both.
-- CardDB.elixir: clone 1; the_log, zap, freeze 2; tornado, arrows, goblin_barrel, giant_snowball, rage,
+- CardDB.elixir: clone 1; the_log, zap, freeze, rage 2; tornado, arrows, goblin_barrel, giant_snowball,
   void, vines, goblin_curse 3; fireball, lightning, barbarian_barrel, royal_delivery, poison, earthquake 4;
-  graveyard 5; rocket 6.
+  graveyard 5; rocket 6. (Scout listed rage at 3; O12 read cards_stats.json directly: rage.elixir == 2.
+  The §3 stakes total used the ledger's own elixir field, so it is unaffected.)
 
 ## 3. Stakes (lead-computed from summary.json `ghost_delivered_by_base`, 100 held-out ghosts)
 - ZONES (persistent visual): graveyard 34/170, poison 26/104, vines 19/57, tornado 11/33, freeze 7/28,

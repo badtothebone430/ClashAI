@@ -35,6 +35,7 @@ usable placement/trade priors. The strategy buckets (:func:`threat_key`) are dec
 from __future__ import annotations
 
 import json
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -46,6 +47,13 @@ import numpy as np
 
 from . import card_threat
 from .reward import _anchors
+
+# O12: effect-zone team billing needs the shared vocab's AOE class list. Same lookup
+# icebow/src/clashrl/student_live.py already uses to reach pipeline/ from this package.
+_REPO = Path(__file__).resolve().parents[3]         # icebow/src/clashrl/<this file> -> repo root
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+from pipeline import vocab as _vocab                # noqa: E402
 
 __all__ = [
     "Detection", "BoardDetector", "load_detector",
@@ -219,6 +227,17 @@ LOOKALIKES = {
 # graveyard or goblin barrel"). Every other spell detection is an effect animation, not a target.
 SPAWN_SPELLS = frozenset({"graveyard", "goblin_barrel", "royal_delivery"})
 
+# O12 attempt 2 (F1 fix): the OWN-PLAY ANCHOR's troop radius/window (spawn_radius 0.10,
+# spawn_window_s 2.5) is too tight for a zone -- a zone's rendered/detected centroid drifts
+# further from the tap than a troop's spawn point, and its cloud can take a beat longer to be
+# recognised as a distinct box. Measured complaint: my own tornado_aoe 0.15 from the tap (just
+# outside spawn_radius) or first seen 3.0 s later (just outside spawn_window_s) missed the
+# anchor and, since attempt 1 defaulted every unanchored zone to 'enemy', got billed to the
+# opponent. Used ONLY for classes in TeamTracker.ZONE_CLASSES; the troop/building anchor test
+# is untouched (still sr2 / spawn_window_s / enemy_window_s exactly as before).
+ZONE_ANCHOR_RADIUS = 0.16
+ZONE_ANCHOR_WINDOW_S = 3.5
+
 class TeamTracker:
     """LIVE team verdicts by EVIDENCE FUSION over short unit tracks, replacing the old colour-only
     guess. Colour was the weakest possible signal: the HP bar (the one reliable team colour) only
@@ -244,6 +263,15 @@ class TeamTracker:
 
     #: bases that may legally APPEAR deep inside either half (burrowers / grave spawns) -> no side prior
     NO_SIDE_PRIOR = frozenset({"miner", "goblin_drill", "skeletons"})
+
+    #: O12: effect-zone / ground-spell classes (poison_aoe, graveyard_aoe, rage_aoe, freeze_aoe,
+    #: earthquake_aoe, tornado_aoe, ...) -- pipeline.vocab.AOE_CLASSES, the 20 "_aoe" ground-effect
+    #: names. These are stationary, unbodied VFX: no motion, no HP bar, and body-art on a
+    #: translucent colour wash is not a reliable 3:1 majority -- so ranks 2/3/5 of `_verdict`
+    #: abstain, and rank 4 (side prior) can actively MISREAD one (an enemy zone landing deep in MY
+    #: half reads "mine", the zone-shaped twin of the earthquake-on-our-tower bug `test_team_veto`
+    #: documents for troops). They get the dedicated rule in `tag()` instead of the ladder.
+    ZONE_CLASSES: frozenset[str] = _vocab.AOE_CLASSES
 
     def __init__(self, spawn_radius: float = 0.10, spawn_window_s: float = 2.5,
                  track_radius: float = 0.12, forget_s: float = 4.5,
@@ -398,10 +426,16 @@ class TeamTracker:
         missed read doesn't reset a verdict (a Miner at the red enemy tower used to flip to 'enemy' that
         way). Linking is identity-aware (same base, nearest within ``track_radius``), which keeps a long
         memory from leaking a verdict onto a different unit answering it. Mutates + returns ``dets``."""
+        # O12: pruned to the LONGER of a play's own (troop) window and ZONE_ANCHOR_WINDOW_S, so a
+        # play a zone still needs isn't dropped before the per-det check below gets to see it. The
+        # per-det check re-applies the troop window explicitly, so a troop's effective window is
+        # unchanged -- this line only ever makes _plays retain MORE than before, never less.
         self._plays = [p for p in self._plays                     # enemy-side plays (y<0.5) linger longer
-                       if t - p[2] <= (self.enemy_window_s if p[1] < 0.5 else self.spawn_window_s)]
+                       if t - p[2] <= max(self.enemy_window_s if p[1] < 0.5 else self.spawn_window_s,
+                                          ZONE_ANCHOR_WINDOW_S)]
         prev = [tr for tr in self._tracks if t - tr["t"] <= self.forget_s]
         sr2, tr2 = self.spawn_radius ** 2, self.track_radius ** 2
+        zr2 = ZONE_ANCHOR_RADIUS ** 2
         live = []
         for d in dets:
             dx, dy = d.cx, d.gy
@@ -421,14 +455,47 @@ class TeamTracker:
                 trk["bm"] += 1
             elif d.bar_vote == "enemy":
                 trk["be"] += 1
-            # OWN-PLAY ANCHOR (rank 1): same base near a recent own play -> ground-truth 'mine'
+            is_zone = d.cls in self.ZONE_CLASSES
+            # OWN-PLAY ANCHOR (rank 1): same base near a recent own play -> ground-truth 'mine'.
+            # (spells/zones included: Detection.base already strips "_aoe", so this already matches
+            # a poison_aoe det against a recorded base="poison" play.) O12 attempt 2: a zone-class
+            # det uses ZONE_ANCHOR_RADIUS/ZONE_ANCHOR_WINDOW_S instead of sr2/the troop window --
+            # everything else (troops/buildings) matches EXACTLY as before (sr2, and the same
+            # per-play enemy_window_s/spawn_window_s split the old code relied on _plays already
+            # being pruned to; re-checked explicitly here now that _plays can hold zone-only stale
+            # entries too).
             if trk["rank"] > 1 and any(
-                    (pb is None or pb == d.base) and (dx - px) ** 2 + (dy - py) ** 2 <= sr2
-                    for px, py, _, pb in self._plays):
+                    (pb is None or pb == d.base) and
+                    (dx - px) ** 2 + (dy - py) ** 2 <= (zr2 if is_zone else sr2) and
+                    (t - pt) <= (ZONE_ANCHOR_WINDOW_S if is_zone else
+                                 (self.enemy_window_s if py < 0.5 else self.spawn_window_s))
+                    for px, py, pt, pb in self._plays):
                 team, nb = self._claim("mine", d.base, 1)
                 trk["team"], trk["rank"] = team, 1
                 if nb != d.base:
                     d.cls = nb                                    # lookalike relabel (base follows cls)
+            elif (trk["rank"] > 1 and is_zone
+                  and not (self.own_cards is not None and d.base in self.own_cards)):
+                # ZONE DEFAULT (O12): no anchor match above -> the opponent cast it. Assigned at
+                # rank 1 (not the ladder's rank 9/"unknown") so it is STICKY: a later own play
+                # landing near this track cannot reopen the anchor branch above (gated on
+                # `rank > 1`) and flip it. Troops/buildings never match ZONE_CLASSES, so the
+                # ladder below is untouched for them.
+                #
+                # DECK GUARD (F1, attempt 2): this default only fires when the zone's card is NOT
+                # in `self.own_cards` (the same deck set the veto in `_claim` already uses -- see
+                # its docstring). A base we own genuinely CAN be ours even with no anchor (the
+                # anchor can miss: a wider zone render, or a recognition delay past the window),
+                # and forcing 'enemy' there would let S1/the estimator bill the opponent for OUR
+                # OWN spell. When the base is ours, fall through to the unchanged `_verdict` ladder
+                # below instead, which resolves 'unknown' exactly as attempt 1 (and pre-O12) did.
+                # When own_cards is None (deck unknown -- offline/label tools, the monitor
+                # overlay), there is no positive evidence the zone could be ours, so the default
+                # still applies, same as attempt 1.
+                team, nb = self._claim("enemy", d.base, 1)
+                trk["team"], trk["rank"] = team, 1
+                if nb != d.base:
+                    d.cls = nb
             else:
                 team, rank = self._verdict(d, trk)
                 if rank <= trk["rank"]:                           # stronger/equal evidence -> (re)decide
