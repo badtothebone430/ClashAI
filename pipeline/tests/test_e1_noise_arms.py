@@ -9,6 +9,7 @@ is never touched.
 """
 from __future__ import annotations
 
+import dataclasses
 import sys
 import unittest
 from dataclasses import replace
@@ -25,11 +26,12 @@ from pipeline import e1_eval                                  # noqa: E402
 from pipeline import e1_view                                   # noqa: E402
 from pipeline import obs_contract as oc                        # noqa: E402
 from pipeline import vocab                                     # noqa: E402
-from pipeline.e1_view import ALL_NOISE_OFF, Noise, live_view    # noqa: E402
+from pipeline.e1_view import ALL_NOISE_OFF, KING_HP_LIVE, Noise, live_view    # noqa: E402
 from pipeline.obs_contract import UNKNOWN_TEAM_RATE             # noqa: E402
 from pipeline.tests.test_obs_contract import ENGINE_DECK, raw_obs   # noqa: E402
 
-NOISE_FIELDS = ("recall", "false_pos", "position", "team", "unit_hp", "scalars", "deploying", "conf")
+NOISE_FIELDS = ("recall", "false_pos", "position", "team", "unit_hp", "my_elixir", "opp_elixir", "king_hp",
+                "deploying", "conf")
 
 
 def _is_subsequence(sub, full) -> bool:
@@ -124,6 +126,263 @@ def raw_obs_board(deck):
 
 
 # ------------------------------------------------------------------------------------------------------
+# O5: golden for the split -- live_view(..., Noise(my_elixir=False, opp_elixir=False, king_hp=False)) must
+# stay bit-identical to what the PRE-split single-field live_view(..., Noise(scalars=False)) produced at
+# HEAD 4bca159. Captured BEFORE the O5 edit landed, by running (against the unedited e1_view.py, which still
+# had the single `scalars` field) the exact fixtures/pattern this file already uses:
+#     deck = _deck()
+#     boards_seeds = [(_bs(deck), 0), (_bs(deck, extra_enemy=0), 1), (raw_obs_board(deck), 2)]
+#     golden = [dataclasses.asdict(live_view(bs, np.random.default_rng(seed), deck, Noise(scalars=False)))
+#               for bs, seed in boards_seeds]
+# (ad hoc capture script, run once against the unedited tree; full script + exact output logged in
+# scratchpad/gauntlet/L67/split/O5_split_switch.md). Pasted verbatim (pprint.pformat) below.
+# ------------------------------------------------------------------------------------------------------
+_O5_GOLDEN_SCALARS_OFF = [{'deck': (0, 164, 2, 3, 4, 149, 6, 7),
+  'double_elixir': False,
+  'my_elixir': 6.37,
+  'my_elixir_exact': True,
+  'my_hand': (164, 149, 3, 2),
+  'my_next': 7,
+  'opp_elixir': 3.0,
+  'overtime': False,
+  'source': 'degraded',
+  'spells': (),
+  't_sec': 60.0,
+  't_source': 'clock',
+  'towers': ({'alive': True, 'hp_frac': 1.0, 'kind': 'king', 'lane': None, 'side': 0},
+             {'alive': True, 'hp_frac': 0.6553079947575361, 'kind': 'princess', 'lane': 'L', 'side': 0},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 0},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'king', 'lane': None, 'side': 1},
+             {'alive': True, 'hp_frac': 0.16382699868938402, 'kind': 'princess', 'lane': 'L', 'side': 1},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 1}),
+  'units': ({'age_sec': None,
+             'cls': 5,
+             'conf': 0.8762717774709268,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': -1,
+             'x': 0.21891960063993965,
+             'y': 0.7277559435218587},
+            {'age_sec': None,
+             'cls': 3,
+             'conf': 0.7186838389326549,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.4268510635492696,
+             'y': 0.6540800105634149},
+            {'age_sec': None,
+             'cls': 144,
+             'conf': 0.5317555051149931,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.4037629247386971,
+             'y': 0.654866906785709},
+            {'age_sec': None,
+             'cls': 7,
+             'conf': 0.8642305533992394,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.31193936454151994,
+             'y': 0.5843956999040945},
+            {'age_sec': None,
+             'cls': 11,
+             'conf': 0.6602399862834551,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.7277271003089735,
+             'y': 0.29830224429398655},
+            {'age_sec': None,
+             'cls': 68,
+             'conf': 0.8033420510553145,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.15032095143120816,
+             'y': 0.43567730827619544},
+            {'age_sec': None,
+             'cls': 92,
+             'conf': 0.6179704722149982,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.2973105627952885,
+             'y': 0.4255939073015058},
+            {'age_sec': None,
+             'cls': 159,
+             'conf': 0.8895413720784351,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.3508390980407983,
+             'y': 0.4330431378330924},
+            {'age_sec': None,
+             'cls': 120,
+             'conf': 0.3723691594576961,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.3987669403934391,
+             'y': 0.4122949582084376},
+            {'age_sec': None,
+             'cls': 48,
+             'conf': 0.9312562795460955,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.5434841969282533,
+             'y': 0.38365125538128225},
+            {'age_sec': None,
+             'cls': 84,
+             'conf': 0.832194182988158,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.5560233640949449,
+             'y': 0.37573165745052967},
+            {'age_sec': None,
+             'cls': 125,
+             'conf': 0.862207457622139,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.7677725063054303,
+             'y': 0.34080643948418804})},
+ {'deck': (0, 164, 2, 3, 4, 149, 6, 7),
+  'double_elixir': False,
+  'my_elixir': 6.37,
+  'my_elixir_exact': True,
+  'my_hand': (164, 149, 3, 2),
+  'my_next': 7,
+  'opp_elixir': 3.0,
+  'overtime': False,
+  'source': 'degraded',
+  'spells': (),
+  't_sec': 60.0,
+  't_source': 'clock',
+  'towers': ({'alive': True, 'hp_frac': 1.0, 'kind': 'king', 'lane': None, 'side': 0},
+             {'alive': True, 'hp_frac': 0.6553079947575361, 'kind': 'princess', 'lane': 'L', 'side': 0},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 0},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'king', 'lane': None, 'side': 1},
+             {'alive': True, 'hp_frac': 0.16382699868938402, 'kind': 'princess', 'lane': 'L', 'side': 1},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 1}),
+  'units': ({'age_sec': None,
+             'cls': 5,
+             'conf': 0.8800868557563805,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.24276267580975117,
+             'y': 0.7233967713838289},
+            {'age_sec': None,
+             'cls': 3,
+             'conf': 0.826859566084925,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.4535587543490963,
+             'y': 0.6760112382342184},
+            {'age_sec': None,
+             'cls': 7,
+             'conf': 0.4627947363899953,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.29274893309364347,
+             'y': 0.5943085921364608},
+            {'age_sec': None,
+             'cls': 68,
+             'conf': 0.8521352558575177,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.8101293731377329,
+             'y': 0.38915706068398775},
+            {'age_sec': None,
+             'cls': 11,
+             'conf': 0.9519247223371549,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.7276552704977863,
+             'y': 0.3422821074929054})},
+ {'deck': (0, 164, 2, 3, 4, 149, 6, 7),
+  'double_elixir': False,
+  'my_elixir': 6.37,
+  'my_elixir_exact': True,
+  'my_hand': (164, 149, 3, 2),
+  'my_next': 7,
+  'opp_elixir': 3.0,
+  'overtime': False,
+  'source': 'degraded',
+  'spells': (),
+  't_sec': 60.0,
+  't_source': 'clock',
+  'towers': ({'alive': True, 'hp_frac': 1.0, 'kind': 'king', 'lane': None, 'side': 0},
+             {'alive': True, 'hp_frac': 0.6553079947575361, 'kind': 'princess', 'lane': 'L', 'side': 0},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 0},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'king', 'lane': None, 'side': 1},
+             {'alive': True, 'hp_frac': 0.16382699868938402, 'kind': 'princess', 'lane': 'L', 'side': 1},
+             {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 1}),
+  'units': ({'age_sec': None,
+             'cls': 5,
+             'conf': 0.9114874642416753,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': -1,
+             'x': 0.20915351118520353,
+             'y': 0.7129412939210515},
+            {'age_sec': None,
+             'cls': 3,
+             'conf': 0.5360312400460585,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.45147471118938565,
+             'y': 0.6640868663627868},
+            {'age_sec': None,
+             'cls': 7,
+             'conf': 0.8198476680456595,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.2752978264848431,
+             'y': 0.6014181225401284},
+            {'age_sec': None,
+             'cls': 68,
+             'conf': 0.9525516268254066,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 0,
+             'x': 0.7860420529811609,
+             'y': 0.3807727112761443},
+            {'age_sec': None,
+             'cls': 11,
+             'conf': 0.8925093892538375,
+             'deploying': None,
+             'hp_frac': 1.0,
+             'side': 1,
+             'x': 0.6846014368756143,
+             'y': 0.32433301568919687})}]
+
+
+class TestGoldenSplitMatchesPreO5Scalars(unittest.TestCase):
+    """b: the split (my_elixir/opp_elixir/king_hp all False) must be bit-identical to the pre-split
+    scalars=False golden above, on the same boards/seeds it was captured with."""
+
+    def test_three_switches_off_matches_scalars_off_golden(self):
+        deck = _deck()
+        boards_seeds = [(_bs(deck), 0), (_bs(deck, extra_enemy=0), 1), (raw_obs_board(deck), 2)]
+        noise = Noise(my_elixir=False, opp_elixir=False, king_hp=False)
+        for (bs, seed), golden in zip(boards_seeds, _O5_GOLDEN_SCALARS_OFF):
+            v = live_view(bs, np.random.default_rng(seed), deck, noise)
+            self.assertEqual(dataclasses.asdict(v), golden, seed)
+
+
+# ------------------------------------------------------------------------------------------------------
 # item 4: all switches off == the clean path (--obs clean), tokens/scalars
 # ------------------------------------------------------------------------------------------------------
 class TestAllOffMatchesClean(unittest.TestCase):
@@ -166,10 +425,11 @@ class TestRngStability(unittest.TestCase):
         cls.bs = replace(cls.bs, units=(replace(cls.bs.units[0], deploying=True),) + cls.bs.units[1:])
 
     def test_field_only_components_do_not_change_which_units_or_fps_appear(self):
-        """position / team / conf / unit_hp / scalars / deploying never gate degrade()'s control flow: with
-        one of them off, the SAME units (by class, in the SAME order) are kept and the SAME false positives
-        are added, for every seed -- only that switch's own field(s) may differ."""
-        field_only = ("position", "team", "conf", "unit_hp", "scalars", "deploying")
+        """position / team / conf / unit_hp / my_elixir / opp_elixir / king_hp / deploying never gate
+        degrade()'s control flow: with one of them off, the SAME units (by class, in the SAME order) are
+        kept and the SAME false positives are added, for every seed -- only that switch's own field(s) may
+        differ."""
+        field_only = ("position", "team", "conf", "unit_hp", "my_elixir", "opp_elixir", "king_hp", "deploying")
         counts_seen = set()
         for seed in range(60):
             d0 = e1_view._degrade_switchable(self.bs, np.random.default_rng(seed), Noise())
@@ -226,10 +486,15 @@ class TestRngStability(unittest.TestCase):
         d = e1_view._degrade_switchable(self.bs, np.random.default_rng(0), Noise(deploying=False))
         for u, src in zip(d.units, self.bs.units):
             self.assertEqual(u.deploying, src.deploying)
-        d = e1_view._degrade_switchable(self.bs, np.random.default_rng(0), Noise(scalars=False))
+        d = e1_view._degrade_switchable(self.bs, np.random.default_rng(0), Noise(my_elixir=False))
         self.assertEqual(d.my_elixir, self.bs.my_elixir)
         self.assertTrue(d.my_elixir_exact)
+        d = e1_view._degrade_switchable(self.bs, np.random.default_rng(0), Noise(opp_elixir=False))
         self.assertEqual(d.opp_elixir, self.bs.opp_elixir)
+        d = e1_view._degrade_switchable(self.bs, np.random.default_rng(0), Noise(king_hp=False))
+        for t, src in zip(d.towers, self.bs.towers):
+            if t.kind == "king" and t.alive:
+                self.assertEqual(t.hp_frac, src.hp_frac)
 
     @patch("pipeline.e1_view.DEGRADE_PRECISION", 1.0)
     def test_recall_off_drops_nothing_and_keeps_the_kept_units_untouched(self):
@@ -268,6 +533,64 @@ class TestRngStability(unittest.TestCase):
                 clean_seen += 1
         self.assertGreater(fp_seen, 0, "DEGRADE_PRECISION=0.886 never added a false positive over 80 seeds")
         self.assertGreater(clean_seen, 0)
+
+
+# ------------------------------------------------------------------------------------------------------
+# O5 split: my_elixir / opp_elixir / king_hp are three independent switches (formerly one `scalars` field).
+# c: each switch alone must change ONLY its own field(s) -- the other two scalar targets, and units/spells
+# (the RNG-consuming path), stay byte-identical to Noise() (default, all on).
+# ------------------------------------------------------------------------------------------------------
+class TestThreeSwitchesIsolated(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.deck = _deck()
+        base = _bs(cls.deck)          # my_elixir=6.37 (fractional) and opp_elixir=3.0 are already non-trivial
+        towers = list(base.towers)    # for the my_elixir/opp_elixir checks below; kings start at hp_frac 1.0,
+        towers[0] = replace(towers[0], hp_frac=0.42)   # so damage them (my K, index 0) so king_hp=False is a
+        towers[3] = replace(towers[3], hp_frac=0.77)   # real, non-trivial difference too (opp K, index 3)
+        cls.bs = replace(base, towers=tuple(towers))
+
+    def test_my_elixir_off_changes_only_my_elixir(self):
+        for seed in range(10):
+            v0 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise())
+            v1 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise(my_elixir=False))
+            self.assertEqual(v0.my_elixir, 6.0, seed)                    # default: floored
+            self.assertEqual(v1.my_elixir, self.bs.my_elixir, seed)      # off: exact, unfloored
+            self.assertFalse(v0.my_elixir_exact, seed)
+            self.assertTrue(v1.my_elixir_exact, seed)
+            self.assertEqual(v0.opp_elixir, v1.opp_elixir, seed)         # unchanged
+            self.assertEqual(v0.towers, v1.towers, seed)                 # unchanged, king_hp included
+            self.assertEqual(v0.units, v1.units, seed)                   # RNG path untouched
+            self.assertEqual(v0.spells, v1.spells, seed)
+
+    def test_opp_elixir_off_changes_only_opp_elixir(self):
+        for seed in range(10):
+            v0 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise())
+            v1 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise(opp_elixir=False))
+            self.assertIsNone(v0.opp_elixir, seed)                       # default: dropped
+            self.assertEqual(v1.opp_elixir, self.bs.opp_elixir, seed)    # off: true value kept
+            self.assertEqual(v0.my_elixir, v1.my_elixir, seed)           # unchanged
+            self.assertEqual(v0.my_elixir_exact, v1.my_elixir_exact, seed)
+            self.assertEqual(v0.towers, v1.towers, seed)                 # unchanged, king_hp included
+            self.assertEqual(v0.units, v1.units, seed)                   # RNG path untouched
+            self.assertEqual(v0.spells, v1.spells, seed)
+
+    def test_king_hp_off_changes_only_king_towers(self):
+        for seed in range(10):
+            v0 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise())
+            v1 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise(king_hp=False))
+            self.assertEqual(v0.my_elixir, v1.my_elixir, seed)           # unchanged
+            self.assertEqual(v0.my_elixir_exact, v1.my_elixir_exact, seed)
+            self.assertEqual(v0.opp_elixir, v1.opp_elixir, seed)         # unchanged
+            for t0, t1, src in zip(v0.towers, v1.towers, self.bs.towers):
+                if t1.kind == "king" and t1.alive:
+                    self.assertEqual(t0.hp_frac, KING_HP_LIVE, seed)     # default: filled to 1.0
+                    self.assertEqual(t1.hp_frac, src.hp_frac, seed)      # off: true (damaged) hp kept
+                    self.assertNotEqual(t0.hp_frac, t1.hp_frac, seed)    # a real, non-trivial difference
+                else:
+                    self.assertEqual(t0, t1, seed)                       # princess towers: untouched either way
+            self.assertEqual(v0.units, v1.units, seed)                   # RNG path untouched
+            self.assertEqual(v0.spells, v1.spells, seed)
 
 
 # ------------------------------------------------------------------------------------------------------
@@ -370,6 +693,21 @@ class TestNoiseOffCli(unittest.TestCase):
             e1_eval.parse_noise_off("bogus")
         with self.assertRaises(SystemExit):
             e1_eval.parse_noise_off("recall,not_a_component")
+
+    # -- O5: 'scalars' is kept as an alias for the three fields it split into -----------------------------
+    def test_scalars_alias_expands_to_the_three_split_fields(self):
+        n = e1_eval.parse_noise_off("scalars")
+        self.assertEqual(n, Noise(my_elixir=False, opp_elixir=False, king_hp=False))
+        self.assertEqual(e1_eval.noise_off_names(n), ["king_hp", "my_elixir", "opp_elixir"])
+
+    def test_scalars_alias_combines_with_a_plain_name(self):
+        n = e1_eval.parse_noise_off("scalars,recall")
+        self.assertEqual(n, Noise(my_elixir=False, opp_elixir=False, king_hp=False, recall=False))
+        self.assertEqual(e1_eval.noise_off_names(n), ["king_hp", "my_elixir", "opp_elixir", "recall"])
+
+    def test_scalars_alias_still_rejects_an_unknown_name_alongside_it(self):
+        with self.assertRaises(SystemExit):
+            e1_eval.parse_noise_off("scalars,bogus")
 
     def test_argparse_wires_the_flag(self):
         a = e1_eval.build_parser().parse_args(["--port", "1", "--out", "x"])
