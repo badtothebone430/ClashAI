@@ -369,6 +369,160 @@ _O5_GOLDEN_SCALARS_OFF = [{'deck': (0, 164, 2, 3, 4, 149, 6, 7),
              'y': 0.32433301568919687})}]
 
 
+def _damaged_kings(bs: oc.BoardState) -> oc.BoardState:
+    """``bs`` with BOTH king towers' true hp_frac damaged (0.42 mine, 0.77 opp) -- see attempt-2 note below."""
+    t = list(bs.towers)
+    t[0] = replace(t[0], hp_frac=0.42)   # my king (BoardState.towers order: my K,L,R, opp K,L,R -- index 0)
+    t[3] = replace(t[3], hp_frac=0.77)   # opp king (index 3)
+    assert t[0].kind == "king" and t[3].kind == "king"
+    return replace(bs, towers=tuple(t))
+
+
+# Attempt-2 finding 1 (blind verifier): every board in ``_O5_GOLDEN_SCALARS_OFF`` above has BOTH kings at
+# hp_frac 1.0 == KING_HP_LIVE, so that golden alone cannot detect a broken king_hp switch -- a live_view that
+# left kings filled to 1.0 even with king_hp=False would still match it. This second golden closes that gap:
+# ``_bs(deck)`` (my_elixir=6.37 fractional + exact=True, opp_elixir=3.0 -- both already non-trivial) with
+# ``_damaged_kings`` applied (kings 0.42 / 0.77, i.e. != 1.0 == KING_HP_LIVE) and seed 3. Captured the SAME
+# way as the first golden, but against the HEAD-4bca159 copy of e1_view.py (single `scalars` field) rather
+# than a hand-edited live one: `scratchpad/gauntlet/L67/split/v5_scratch/e1_view_head.py`, first verified
+# byte-identical to `git show 4bca159:pipeline/e1_view.py` (``diff`` -> no output) before this was run --
+#     bs = _damaged_kings(_bs(deck))
+#     v = head.live_view(bs, np.random.default_rng(3), deck, head.Noise(scalars=False))
+#     golden = dataclasses.asdict(v)
+# where ``head`` is that HEAD file loaded via importlib (not the real, edited pipeline/e1_view.py -- read-only
+# on it). Full capture script + raw output logged in O5_split_switch.md Attempt 2. Pasted verbatim below.
+_O5_GOLDEN_SCALARS_OFF_DAMAGED_KINGS = {'deck': (0, 164, 2, 3, 4, 149, 6, 7),
+ 'double_elixir': False,
+ 'my_elixir': 6.37,
+ 'my_elixir_exact': True,
+ 'my_hand': (164, 149, 3, 2),
+ 'my_next': 7,
+ 'opp_elixir': 3.0,
+ 'overtime': False,
+ 'source': 'degraded',
+ 'spells': (),
+ 't_sec': 60.0,
+ 't_source': 'clock',
+ 'towers': ({'alive': True, 'hp_frac': 0.42, 'kind': 'king', 'lane': None, 'side': 0},
+            {'alive': True, 'hp_frac': 0.6553079947575361, 'kind': 'princess', 'lane': 'L', 'side': 0},
+            {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 0},
+            {'alive': True, 'hp_frac': 0.77, 'kind': 'king', 'lane': None, 'side': 1},
+            {'alive': True, 'hp_frac': 0.16382699868938402, 'kind': 'princess', 'lane': 'L', 'side': 1},
+            {'alive': True, 'hp_frac': 1.0, 'kind': 'princess', 'lane': 'R', 'side': 1}),
+ 'units': ({'age_sec': None,
+            'cls': 5,
+            'conf': 0.5362445843016838,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 0,
+            'x': 0.15833059643936767,
+            'y': 0.7246295150320813},
+           {'age_sec': None,
+            'cls': 3,
+            'conf': 0.8473420661831892,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.42281411753757087,
+            'y': 0.7186046807028187},
+           {'age_sec': None,
+            'cls': 7,
+            'conf': 0.8510089041920039,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 0,
+            'x': 0.2680077533469114,
+            'y': 0.6005273570258767},
+           {'age_sec': None,
+            'cls': 20,
+            'conf': 0.9470789615344484,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 0,
+            'x': 0.30806141792709135,
+            'y': 0.5779616020120619},
+           {'age_sec': None,
+            'cls': 68,
+            'conf': 0.6340150289939948,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 0,
+            'x': 0.7716888108008002,
+            'y': 0.3890950350179394},
+           {'age_sec': None,
+            'cls': 11,
+            'conf': 0.8168159858086336,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.724510139804281,
+            'y': 0.3219233424897755},
+           {'age_sec': None,
+            'cls': 68,
+            'conf': 0.8576263711290704,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.1841802888004014,
+            'y': 0.4312454576544609},
+           {'age_sec': None,
+            'cls': 204,
+            'conf': 0.6503233283272503,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.2081893326377417,
+            'y': 0.44355673894576936},
+           {'age_sec': None,
+            'cls': 92,
+            'conf': 0.7477747574693904,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.29234123824417,
+            'y': 0.41885396843727857},
+           {'age_sec': None,
+            'cls': 120,
+            'conf': 0.7684624726950458,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.3479174602916267,
+            'y': 0.4071127837320993},
+           {'age_sec': None,
+            'cls': 48,
+            'conf': 0.8325852737922558,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.528910026210804,
+            'y': 0.3602780493419752},
+           {'age_sec': None,
+            'cls': 84,
+            'conf': 0.47760584040746323,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.6199744097682843,
+            'y': 0.3602567973954678},
+           {'age_sec': None,
+            'cls': 125,
+            'conf': 0.831233902524061,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.7410416870396569,
+            'y': 0.3699719914649754},
+           {'age_sec': None,
+            'cls': 70,
+            'conf': 0.8701078561407092,
+            'deploying': None,
+            'hp_frac': 1.0,
+            'side': 1,
+            'x': 0.7983373522963173,
+            'y': 0.31373808746264337})}
+
+
 class TestGoldenSplitMatchesPreO5Scalars(unittest.TestCase):
     """b: the split (my_elixir/opp_elixir/king_hp all False) must be bit-identical to the pre-split
     scalars=False golden above, on the same boards/seeds it was captured with."""
@@ -380,6 +534,15 @@ class TestGoldenSplitMatchesPreO5Scalars(unittest.TestCase):
         for (bs, seed), golden in zip(boards_seeds, _O5_GOLDEN_SCALARS_OFF):
             v = live_view(bs, np.random.default_rng(seed), deck, noise)
             self.assertEqual(dataclasses.asdict(v), golden, seed)
+
+    def test_damaged_kings_matches_scalars_off_golden(self):
+        """The discriminating case attempt-2 asked for: kings != 1.0, so this golden WOULD fail if king_hp
+        silently kept filling 1.0 (or any other king_hp regression) -- unlike the three boards above."""
+        deck = _deck()
+        bs = _damaged_kings(_bs(deck))
+        noise = Noise(my_elixir=False, opp_elixir=False, king_hp=False)
+        v = live_view(bs, np.random.default_rng(3), deck, noise)
+        self.assertEqual(dataclasses.asdict(v), _O5_GOLDEN_SCALARS_OFF_DAMAGED_KINGS)
 
 
 # ------------------------------------------------------------------------------------------------------
@@ -552,8 +715,12 @@ class TestThreeSwitchesIsolated(unittest.TestCase):
 
     def test_my_elixir_off_changes_only_my_elixir(self):
         for seed in range(10):
-            v0 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise())
-            v1 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise(my_elixir=False))
+            r0 = np.random.default_rng(seed)
+            v0 = live_view(self.bs, r0, self.deck, Noise())
+            s0 = r0.bit_generator.state                                  # reference: the all-on draw sequence
+            r1 = np.random.default_rng(seed)
+            v1 = live_view(self.bs, r1, self.deck, Noise(my_elixir=False))
+            self.assertEqual(r1.bit_generator.state, s0, seed)           # my_elixir=False draws nothing extra
             self.assertEqual(v0.my_elixir, 6.0, seed)                    # default: floored
             self.assertEqual(v1.my_elixir, self.bs.my_elixir, seed)      # off: exact, unfloored
             self.assertFalse(v0.my_elixir_exact, seed)
@@ -565,8 +732,12 @@ class TestThreeSwitchesIsolated(unittest.TestCase):
 
     def test_opp_elixir_off_changes_only_opp_elixir(self):
         for seed in range(10):
-            v0 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise())
-            v1 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise(opp_elixir=False))
+            r0 = np.random.default_rng(seed)
+            v0 = live_view(self.bs, r0, self.deck, Noise())
+            s0 = r0.bit_generator.state                                  # reference: the all-on draw sequence
+            r1 = np.random.default_rng(seed)
+            v1 = live_view(self.bs, r1, self.deck, Noise(opp_elixir=False))
+            self.assertEqual(r1.bit_generator.state, s0, seed)           # opp_elixir=False draws nothing extra
             self.assertIsNone(v0.opp_elixir, seed)                       # default: dropped
             self.assertEqual(v1.opp_elixir, self.bs.opp_elixir, seed)    # off: true value kept
             self.assertEqual(v0.my_elixir, v1.my_elixir, seed)           # unchanged
@@ -577,8 +748,12 @@ class TestThreeSwitchesIsolated(unittest.TestCase):
 
     def test_king_hp_off_changes_only_king_towers(self):
         for seed in range(10):
-            v0 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise())
-            v1 = live_view(self.bs, np.random.default_rng(seed), self.deck, Noise(king_hp=False))
+            r0 = np.random.default_rng(seed)
+            v0 = live_view(self.bs, r0, self.deck, Noise())
+            s0 = r0.bit_generator.state                                  # reference: the all-on draw sequence
+            r1 = np.random.default_rng(seed)
+            v1 = live_view(self.bs, r1, self.deck, Noise(king_hp=False))
+            self.assertEqual(r1.bit_generator.state, s0, seed)           # king_hp=False draws nothing extra
             self.assertEqual(v0.my_elixir, v1.my_elixir, seed)           # unchanged
             self.assertEqual(v0.my_elixir_exact, v1.my_elixir_exact, seed)
             self.assertEqual(v0.opp_elixir, v1.opp_elixir, seed)         # unchanged
