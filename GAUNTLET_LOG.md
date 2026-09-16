@@ -1827,3 +1827,12 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **MECHANISM NOT ESTABLISHED:** `scalars` bundles THREE things (e1_view.py:158-163,183) -- exact unfloored my_elixir, true opp_elixir vs unknown, and king tower hp_frac. +20 belongs to all three together; splitting them needs new Noise switches.
 - **UNCONFIRMED:** one 100-opponent slice. Disjoint-slice replication (control + scalars on held-out 100:200, own control) launched as chain_scalars_confirm.ps1.
 - **Retired tonight (both mine, both wrong):** "add unit HP to the observation" (3 instruments now point the other way) and "improve the detector" (recall +3, precision +6, conf 0).
+
+
+## L67bb (2026-09-16) -- scalars finding REPLICATES on a disjoint slice: +24pp (vs +20pp original)
+- **Replication (a, n=100/cell):** held-out 100:200, own control. control 0.47 (0.37-0.57), scalars-off 0.71 (0.62-0.80) = **+24**. Original slice 0:100: 0.52 / 0.72 = **+20**.
+- **CONFIRMED:** 200 distinct held-out opponents, two disjoint slices, each with its own control. Both arms clear their control's upper bound. First replicated positive result in this line.
+- **Control drift (a):** the two controls differ 5pp (0.52 vs 0.47) on identical settings -- pure opponent draw. Reading slice 2 against slice 1's control would have given +19 not +24. The L67au per-slice-control rule paid for itself on first use.
+- **Scale (a):** ~+22pp mean vs a total gap of +38/+40 -- scalars carries ~55-60% of it; the other six arms sum ~+12, none individually distinguishable from zero.
+- **NOT established:** which of the THREE bundled things (exact my_elixir / true opp_elixir / king hp_frac) carries it; live transfer (live already wires opp_elixir, floors my_elixir); single ckpt/tau/seed.
+- **Next (proposed, not started):** split the switch into 3 and run 3 arms + own control, ~1.5 h engine.

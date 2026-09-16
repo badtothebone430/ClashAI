@@ -3378,6 +3378,30 @@ Both tau 0.24 runs pause more than the tau 0.27 run (22:48 run by video: 44% vs 
 *Consequences for the v7 observation plan (b).* `unit_hp` is now the **second** instrument pointing away from unit HP (arm -3pp here; the live HP-bar reader fires on 3.6% of detections, 5cs.99 AX; and supplying HP live lowered top-1 share, 5cs.98 D) -- three results, three instruments, same direction. Detector recall/precision (+3/+6) are **not** the lever either, which retires "improve the detector" as the headline fix. Whatever inside `scalars` carries the 20 points is the first thing v7 should supply, with a measured live error applied as training noise (the recipe that made v6aug work).
 
 
+**BA. L67bb -- THE SCALARS FINDING REPLICATES ON A DISJOINT SLICE (+24pp on 100 opponents it was never measured on).** `chain_scalars_confirm.ps1` (pid 51796, 2026-09-16 03:02Z -> 03:55Z), same checkpoint/rule/tau as AZ, held-out entries **100:200** -- disjoint from the 0:100 that produced the finding -- with its **own** control run in the same batch.
+
+*Result (a, n=100 per row).*
+
+| slice | control | `scalars` off | effect |
+|---|---|---|---|
+| 0:100 (AZ, original) | 0.52 (0.42-0.62) | 0.72 (0.63-0.81) | **+20** |
+| **100:200 (this, disjoint)** | **0.47 (0.37-0.57)** | **0.71 (0.62-0.80)** | **+24** |
+
+**CONFIRMED (a).** Two disjoint slices, 200 distinct held-out opponents, each slice anchored on its own control: +20 and +24. Both arms' intervals clear their own control's upper bound (0.63 vs 0.62; 0.62 vs 0.57). This is the first replicated positive result in this line of work, and it survives the project's own disjoint-slice rule -- the rule that has caught three false headlines before (L38, L39, 5v).
+
+*Control drift is real and was absorbed by design (a).* The two controls differ by 5pp (0.52 vs 0.47) on the same checkpoint, same instrument, differing only in which opponents were drawn. Had the slice-2 arm been read against the slice-1 control, the measured effect would have been +19 instead of +24 -- a 5pp artifact of opponent draw. This is the L67au rule (every chain runs its own full-n unchanged control in the same batch) paying for itself on its first use.
+
+*Scale of the effect (a).* Mean effect ~+22pp against a total clean-vs-live gap of +38 (all-8-off gate, n=10) / +40 (clean obs, E2). **`scalars` carries roughly 55-60% of the entire gap**, with the other six components summing to ~+12 and no single one of them distinguishable from zero.
+
+*What this does NOT establish -- unchanged from AZ, and the mechanism question is now the whole game.*
+- **Which of the three bundled things carries it.** `scalars` (e1_view.py:158-163,183) = exact unfloored `my_elixir` + `my_elixir_exact` flag, true `opp_elixir` instead of unknown, and king tower `hp_frac`. Replicating the bundle does nothing to separate them. Splitting requires new `Noise` switches and three arms.
+- **Live transfer.** This is engine evaluation against recorded ghosts under the live rule, not live play. The live path already supplies `opp_elixir` from play.py's estimator (accuracy unmeasured) and floors `my_elixir` (`obs_contract.py:475-480`), so the live-side deficit may be smaller than +22pp, or differently distributed across the three.
+- Single checkpoint (v6lat_s0), single tau (0.27), single seed; n=100 per cell (+-10pp).
+- Nothing here says the model would WIN more on ladder; the metric is winrate vs recorded ghosts.
+
+*Immediate next experiment (b, not started, owner to approve).* Split `scalars` into three switches and run three arms on one slice with its own control (~1.5 h engine incl. boot): `my_elixir_exact`, `opp_elixir_known`, `king_hp`. That converts "+22pp lives somewhere in this bundle" into a named feature. Only then does the v7 observation work have a target, and two of the three candidates are reader-level fixes rather than detector projects.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
