@@ -1855,3 +1855,14 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Gate (a):** gate_slice2_10 reproduced ctrl_slice2's 10 records exactly; full control not re-run (determinism measured twice in BB) -- recorded as an evidence-based exception to the L67au rule.
 - **NOT established:** live transfer -- live feeds the model None today (play.student_opp_elixir=False); gain bounded by the estimator's accuracy, measured in step 2 (pending).
 - **Trap:** controls differ 5pp between slices, arms 5pp the other way; per-slice anchoring is not optional at n=100.
+
+
+## L67bj (2026-09-16) -- step 2: OpponentElixirEstimator vs engine truth (100 ghosts, 74,065 samples): +76% over-charge under PERFECT detection; pinned at ~0 for 93% of ticks under the live view
+- **Fidelity (a):** all 100 matches reproduce ctrl_live100 outcome/crowns/plays_accepted exactly.
+- **Table (a):** A (perfect, units) MAE 2.51 bias -1.95, charged 14,364 vs 8,179 delivered (+76%); **A_wl** (live whitelist) MAE 2.35 bias +0.74, 7,729 vs 8,179 -- cancellation of two ~3x errors, not accuracy; at opp-play ticks MAE 3.17 bias +1.95; **B** (live view) MAE 5.90 bias -5.90, share|err|<=1 4.7%, 146,102 charged (18x), **est<=1.0 on 92.9% of ticks**.
+- **Per class (a, delivered -> charges):** tombstone 58->442 (7.6x), witch 16->142, miner 28->201, barbarians 14->180 (12.9x), royal_hogs 49->197, skeletons 133->571. Never-played-base share of over-charge: 1%.
+- **Blind spots (a, top-25):** spells never charged >=1,011 elixir; non-whitelisted troops >=1,221 more under A_wl; 34.4% of all ghost plays (43.7% non-spell) outside detector_cards.
+- **RETRACTED (c, mine):** cadence hypothesis (-3.42 -> -3.34 at 5-tick); spawn hypothesis (1% never-played share). Supported (b): cluster_radius splits multi-body cards; single long-lived units re-charged by an UNRESOLVED path (matched tracks refresh; no entity cap).
+- **B is an upper bound (b):** degrade() noise is i.i.d. per sample; real tracks persist. True live error in [2.35, 5.90].
+- **Verifier caught a real bug (a):** attempt-3 truth ledger used scripted (3,796) not delivered (2,429) plays.
+- **v7 consequence (b):** training on today's error teaches the model to ignore the feature (= status quo). Fix + re-measure the estimator first. Proposals: charge-event trace; first-appearance charging + body-count clustering + TeamTracker input; effect-zone classes for spells; then v7.
