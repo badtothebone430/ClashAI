@@ -49,6 +49,12 @@ Each iteration, in order:
   (L39: 0.4-0.6pp on two checkpoints, 3.9pp on a third), and that band is what decides whether a
   move between two checkpoints is a finding or a wobble. Added 2026-09-03 after L38 reported a
   three-point "recovery" that the fourth point contradicted.
+- **Every ablation/attribution chain runs its own full-n UNCHANGED control, in the same batch.** A
+  control at smaller n, or a baseline number carried from an earlier run, is a different instrument
+  (see the guardrail) and cannot anchor the arms. Added 2026-09-15 after L67at/au shipped a 7-arm
+  chain whose only all-noise-ON control ran at n=10, so every n=100 arm was read against a figure
+  from another run. Audited afterwards it happened to agree (0.52 on the arms' own entries vs 0.53
+  on a different slice) — that is luck, not method, and the next chain may not be lucky.
 - **A null is a result.** Report it plainly; do not go looking for a positive.
 - **Retract loudly.** If a previous loop's conclusion is wrong, say so in the HANDOFF section, in
   the commit message, and in the Discord report. Never quietly correct.
