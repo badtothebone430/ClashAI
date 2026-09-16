@@ -1809,3 +1809,12 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Charge lead (b):** prince 2.01x, dark_prince 1.63x, mega_knight 1.57x, goblin_giant 1.50x, battle_ram 1.37x sit above the bias cluster -- a derived charging flag from data already computed. Confounded by lava_hound 1.38x and the unquantified warp bias.
 - **v7 order changes (b):** velocity in, unit HP out; static card stats need no reader.
 - **Launched:** `chain_noise_attrib.ps1` (step 1) -- 2 gates + 7 single-component `--noise-off` arms x 100 held-out entries, v6lat_s0, live rule.
+
+
+## L67at (2026-09-15) -- noise attribution gates pass; instrument validated end-to-end; arms running
+- **Gates (a, n=10, same held-out entries):** `gate_live10` 0.50 (CI 0.20-0.80) vs 0.52 live baseline; `gate_allof10` 0.90 (CI 0.70-1.00) vs 0.92 clean. Both endpoints of the 40-point gap reproduce through the full engine path.
+- **Means (a):** `--noise-off` plumbing does not perturb the eval; all-switches-off == clean view outside Python too, not just in the 46 unit tests.
+- **NOT established:** anything per-component; n=10 CIs are +-30pp, gates can only fail informatively.
+- **Boot (a):** 3 attempts (exit=1, exit=1, exit=0), 13 min -- matches the known ~1-in-10 segfault rate; retry loop handled it. Free RAM with VM up 2.7 GB.
+- **RETRACTION (c, mine, same session):** the "~4.5 h" arm estimate I gave last loop was wrong (used 21 s/match from another config). Measured 12 s/match; ~2.5 h stands.
+- **Running:** 7 one-change arms x 100 held-out entries (off_recall 82/100 at check time).

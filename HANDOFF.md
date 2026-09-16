@@ -3324,6 +3324,24 @@ Both tau 0.24 runs pause more than the tau 0.27 run (22:48 run by video: 44% vs 
 *What this does NOT establish.* No ground truth exists on a live screen -- every number above is a self-consistency check against a game rule (own-play identity, no-heal monotonicity, a published speed constant), so a reader wrong in a way consistent with those rules passes undetected. `read_hp_frac` returns exactly 1.0 both for "no bar" and "full bar", so the read rate is a proxy. The detector's own recall is a separate unmeasured variable beneath every number here: a unit never boxed contributes no evidence to any check. Towers were assumed alive throughout (no offline tower-HP reader), which cannot affect the at-deploy check.
 
 
+**AY. L67at -- NOISE ATTRIBUTION RUN, GATES PASS: the switchable-degrade instrument reproduces both endpoints of the 40-point gap end-to-end.** Engine run `chain_noise_attrib.ps1` (pid 26064), v6lat_s0, live rule, held-out ghosts, port 38031, shard 0/1, seed 0. Gates only; the seven one-change arms are still running.
+
+*Gates (a, n=10 each, SAME 10 held-out entries, paired).*
+
+| gate | winrate | CI (unpaired) | reference | reference loop |
+|---|---|---|---|---|
+| `gate_live10` -- live view, no switch changed | **0.50** | 0.20-0.80 | 0.52 live baseline | 5cs.99 (E2, n=100) |
+| `gate_allof10` -- all 8 noise components OFF | **0.90** | 0.70-1.00 | 0.92 clean observations | 5cs.99 (E2, n=100) |
+
+*What this establishes (a).* `_degrade_switchable` with every switch off reproduces the clean-observation endpoint **through the full engine path** (0.90 vs 0.92), not merely in-process -- the unit tests (AR, 46 tests) asserted bit-identity against `obs_contract.degrade` and clean equivalence inside Python; this is the first end-to-end confirmation that the new `--noise-off` plumbing does not perturb the eval. The unchanged arm likewise lands on its baseline (0.50 vs 0.52). Both endpoints of the 40-point gap therefore reproduce under the new code path, which is the precondition for attributing the gap to components.
+
+*What this does NOT establish.* **Nothing about any single noise component**, and these are not measurements: at n=10 the CIs are +-30pp and a 0.50-vs-0.90 split is 4 matches. They are gates -- they can only FAIL informatively. A gate that passes at n=10 would also pass if the instrument were wrong by up to ~20pp. The arms (n=100 each) carry the actual result.
+
+*Boot behaviour (a, trap confirmed).* The VM needed **3 attempts** (exit=1, exit=1, exit=0) over 13 min before liveness. Consistent with the recorded ~1-boot-in-10-segfaults rate; the chain's retry loop handled it without intervention. Free RAM with the VM up: 2.7 GB.
+
+***RETRACTION (mine, same session).*** Last loop I told the owner the seven arms would take **~4.5 h**, "correcting" an earlier ~2.5 h estimate. The correction was wrong: it applied a 21 s/match figure from a different configuration. Measured here: `gate_live10` ran 10 matches in **2m02s** (~12 s/match), and `off_recall` reached 82/100 in ~14 min. The original ~2.5 h estimate stands. The lesson is the project's own rule -- do not "correct" a measured number with an arithmetic guess from a different setup.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
