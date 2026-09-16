@@ -1818,3 +1818,12 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Boot (a):** 3 attempts (exit=1, exit=1, exit=0), 13 min -- matches the known ~1-in-10 segfault rate; retry loop handled it. Free RAM with VM up 2.7 GB.
 - **RETRACTION (c, mine, same session):** the "~4.5 h" arm estimate I gave last loop was wrong (used 21 s/match from another config). Measured 12 s/match; ~2.5 h stands.
 - **Running:** 7 one-change arms x 100 held-out entries (off_recall 82/100 at check time).
+
+
+## L67az/ba (2026-09-16) -- attribution screen COMPLETE: `scalars` carries ~20 of the ~38-point gap; six arms are nulls
+- **Table (a, n=100 each, held-out 0:100, v6lat_s0, live rule, tau 0.27) vs control 0.52:** recall 0.55 (+3), false_pos 0.58 (+6), position 0.54 (+2), team 0.56 (+4), unit_hp 0.49 (**-3**), **scalars 0.72 (+20)**, conf 0.52 (0). All-8-off gate (n=10) 0.90 (+38); clean obs (E2) 0.92 (+40).
+- **Reading (a):** six arms indistinguishable from control at +-10pp; only `scalars` clears it (0.63 vs 0.62). Individual effects sum +32 of +38 -- roughly ADDITIVE with one dominant term.
+- **RETRACTION (c, mine, stated 4x across L67av-ay):** "the gap is combinatorial, no single component carries it". Contradicted by arm 6. Five consecutive nulls made a forming hunch feel confirmed; should have stayed (b) until the table was complete.
+- **MECHANISM NOT ESTABLISHED:** `scalars` bundles THREE things (e1_view.py:158-163,183) -- exact unfloored my_elixir, true opp_elixir vs unknown, and king tower hp_frac. +20 belongs to all three together; splitting them needs new Noise switches.
+- **UNCONFIRMED:** one 100-opponent slice. Disjoint-slice replication (control + scalars on held-out 100:200, own control) launched as chain_scalars_confirm.ps1.
+- **Retired tonight (both mine, both wrong):** "add unit HP to the observation" (3 instruments now point the other way) and "improve the detector" (recall +3, precision +6, conf 0).

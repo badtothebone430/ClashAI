@@ -3342,6 +3342,42 @@ Both tau 0.24 runs pause more than the tau 0.27 run (22:48 run by video: 44% vs 
 ***RETRACTION (mine, same session).*** Last loop I told the owner the seven arms would take **~4.5 h**, "correcting" an earlier ~2.5 h estimate. The correction was wrong: it applied a 21 s/match figure from a different configuration. Measured here: `gate_live10` ran 10 matches in **2m02s** (~12 s/match), and `off_recall` reached 82/100 in ~14 min. The original ~2.5 h estimate stands. The lesson is the project's own rule -- do not "correct" a measured number with an arithmetic guess from a different setup.
 
 
+**AZ. L67az/ba -- OBSERVATION ATTRIBUTION SCREEN COMPLETE (owner-approved step 1): one component, `scalars`, carries ~20 of the ~38-point clean-vs-live gap. The other six are nulls.** Engine run `chain_noise_attrib.ps1` (pid 26064, 2026-09-15 23:34Z -> 2026-09-16 02:21Z), v6lat_s0, live rule, tau 0.27, held-out ghosts 0:100, shard 0/1, seed 0, one arm at a time. Each arm removes exactly ONE noise component from the live view; everything else stays degraded.
+
+*Results (a, n=100 per row, same 100 held-out opponents, scored by `pipeline/e1_score`).*
+
+| arm -- noise component removed | winrate | CI | vs control |
+|---|---|---|---|
+| **CONTROL** -- live view, zero switches flipped | **0.52** | 0.42-0.62 | -- |
+| `recall` (detector misses) | 0.55 | 0.45-0.65 | +3 |
+| `false_pos` (phantom detections) | 0.58 | 0.48-0.68 | +6 |
+| `position` (x/y jitter, sigma 0.45 tiles) | 0.54 | 0.44-0.64 | +2 |
+| `team` (side tagging: 25% unknown, 15/40% wrong) | 0.56 | 0.46-0.66 | +4 |
+| `unit_hp` (exact per-unit hp_frac supplied) | 0.49 | 0.39-0.59 | **-3** |
+| **`scalars`** | **0.72** | **0.63-0.81** | **+20** |
+| `conf` (detector confidence exact) | 0.52 | 0.42-0.62 | 0 |
+| *all 8 off (gate, n=10)* | *0.90* | *0.70-1.00* | *+38* |
+| *clean observations (E2, n=100, 5cs.99)* | *0.92* | -- | *+40* |
+
+*Reading (a).* Six of seven single-component arms are indistinguishable from the control at n=100 (+-10pp). `scalars` is the only arm whose interval essentially clears the control's (0.63 vs 0.62). The seven individual effects sum to **+32 against a total gap of +38**, so the gap is roughly **additive with one dominant term** -- most of it lives in one component.
+
+***RETRACTION (mine, stated four times across L67av-ay as it "firmed up").*** I claimed the gap was **combinatorial** -- "no single degradation carries it", and that leave-one-IN arms would be needed to prove it. **Contradicted by arm 6.** Five consecutive nulls made a null prior feel confirmed and I reported a forming conclusion as though the remaining arms were unlikely to overturn it. The project rule exists for exactly this: label it (b) and wait for the full table. Cost: none to the data (the run was already queued), but the interim reports carried a wrong steer.
+
+***MECHANISM NOT ESTABLISHED -- `scalars` is a switch label, not a finding.*** Read from `pipeline/e1_view.py:158-163,183`, the switch bundles **three distinct things**: (1) exact unfloored `my_elixir` + the `my_elixir_exact` flag, (2) the true `opp_elixir` instead of `None`/unknown, (3) **king tower `hp_frac`** (live sends a constant). The +20pp belongs to those three TOGETHER. Naming elixir as the cause is unsupported until they are split into separate switches and run as three arms -- a small code change in `Noise`/`_degrade_switchable`, not another run of the existing instrument.
+
+*Live availability of the three (a, `obs_contract.py:475-480` read in full -- this is the `source="live"` BoardState builder).* (1) Own elixir is **floored live**: `my_elixir=float(int(reads.elixir_int))` with `my_elixir_exact=False`, so the live model never sees the fractional part. (2) **Opponent elixir is ALREADY supplied live**: `opp_elixir=reads.opp_elixir`, from play.py's `OpponentElixirEstimator` (documented at l.345, `None` when unknown) -- its accuracy is unmeasured, but the wire exists. (3) King HP is built by the tower loop at l.464-470 from `reads.tower_hp`; 5cs.99 AW recorded king HP as a constant 1.0 live because it is never printed on screen -- **not re-verified here**, and the one of the three still open.
+
+*Why that matters (b).* Two of the three bundled components are **reader-level fixes, not detector projects**: reading the elixir bar's fractional fill instead of an int, and whatever the king-HP path does. If the split (below) puts the 20 points on own-elixir precision, the fix is comparatively cheap. If it puts them on opponent elixir, the work is measuring and improving an estimator that is already wired. Either way this is a far smaller engineering surface than the unit-HP bar detector that AW originally pointed at.
+
+*What this does NOT establish.*
+- **The headline is UNCONFIRMED.** +20pp comes from ONE 100-opponent slice (entries 0:100). Per the project's disjoint-slice rule a headline is repeated before it is believed. `chain_scalars_confirm.ps1` (control + scalars on held-out **100:200**, its own control on that slice) launched 2026-09-16 03:0xZ; result pending.
+- Engine evaluation against recorded ghosts under the live rule -- **not** live play, and not winrate against a real ladder opponent.
+- Single checkpoint (v6lat_s0), single tau (0.27), single seed. n=100 gives +-10pp, which is why six arms can only be called "not distinguishable from zero", NOT "zero".
+- Arm effects were measured one-at-a-time; the +32-vs-+38 additivity is arithmetic on point estimates, not a tested interaction model.
+
+*Consequences for the v7 observation plan (b).* `unit_hp` is now the **second** instrument pointing away from unit HP (arm -3pp here; the live HP-bar reader fires on 3.6% of detections, 5cs.99 AX; and supplying HP live lowered top-1 share, 5cs.98 D) -- three results, three instruments, same direction. Detector recall/precision (+3/+6) are **not** the lever either, which retires "improve the detector" as the headline fix. Whatever inside `scalars` carries the 20 points is the first thing v7 should supply, with a measured live error applied as training noise (the recipe that made v6aug work).
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
