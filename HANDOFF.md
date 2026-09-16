@@ -3438,6 +3438,25 @@ Both tau 0.24 runs pause more than the tau 0.27 run (22:48 run by video: 44% vs 
 3. **S1 v7 with `opp_elixir` noise matched to the measured estimator error** -- the v6aug recipe (train on the degradation you will actually see live) applied to the one scalar that carries the gap. Only then does live play test whether the +16 transfers.
 
 
+**BC. L67bh-bi -- OPPONENT ELIXIR REPLICATES ON A DISJOINT SLICE: +26pp on 100 opponents it was never measured on (+16 on the original slice). CONFIRMED across 200 distinct held-out ghosts.** Owner-approved step 1 of 2026-09-16. Chain `chain_opp_confirm.ps1` (pid 52760, 20:0x-20:35Z), same instrument as AZ/BA/BB: v6lat_s0, live rule, tau 0.27, port 38031, one switch.
+
+*Results (a, n=100 per row).*
+
+| slice | control | `opp_elixir` off (true opponent elixir) | effect | outcome flips (to win / away) |
+|---|---|---|---|---|
+| 0:100 (BB) | 0.52 (0.42-0.62) | 0.68 (0.59-0.77) | +16 | 22 / 6 |
+| **100:200 (this)** | **0.47** (0.37-0.57) | **0.73** (0.64-0.82) | **+26** | **30 / 4** |
+| *bundle on 100:200 (BA, all three scalar things)* | *0.47* | *0.71* | *+24* | -- |
+
+*Reading (a).* Both arms clear their own slice's control by well over the interval width. 200 distinct opponents, 52 flipped to a win against 10 flipped away. On slice 2 the single switch (+26) equals the full three-way bundle (+24) within noise -- consistent with BB's decomposition (own elixir 0, king HP +3): **opponent elixir is the scalars effect**, and the scalars effect is ~55-60% of the whole 38-40 point clean-vs-live gap.
+
+*Instrument (a).* The full control was NOT re-run on this slice: determinism had been measured record-for-record twice (BB: gate == off_scalars; ctrl_split == ctrl_live100 across ports). In its place `gate_slice2_10` (entries 100:110, no switch) reproduced `ctrl_slice2`'s 10 records exactly (every non-timing field). The rule added in L67au ("every chain runs its own full-n control") is therefore satisfied by evidence rather than repetition; a failed gate would have voided the arm and forced the full control. Recorded as a deliberate exception.
+
+*What this does NOT establish.* Same as BB: engine eval vs recorded ghosts under the live rule, not live play; the effect is for the TRUE opponent elixir, whereas live has only an estimate (and today feeds the model `None` -- `play.student_opp_elixir` defaults False, play.py:186/884, after an earlier live measurement found the estimate suppressed the gate up to 3.2x). The live-side gain is bounded by the estimator's accuracy, which step 2 (BD, pending) measures. Single checkpoint/tau/seed.
+
+*Trap noted (a).* The two slices' controls differ by 5pp (0.52 vs 0.47) and their arms by 5pp the other way (0.68 vs 0.73) -- opponent draw moves both ends of a comparison by about the interval half-width. Per-slice anchoring is not optional at n=100.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).

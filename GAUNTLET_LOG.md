@@ -1847,3 +1847,11 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Live (a):** opp_elixir already fed from OpponentElixirEstimator (play-counting: reset 5.0, subtract cost per clustered new enemy deploy, regen, clamp). Accuracy never measured; error sources = detector misses, wrong identity, regen model.
 - **NOT established:** +16 is one slice (bundle replicated, switch alone not); live transfer bounded by unmeasured estimator accuracy; king_hp +3 within noise.
 - **Next (proposed):** replicate opp_elixir on 100:200; measure the estimator vs engine truth offline (engine deploys vs degraded view); v7 with opp_elixir noise matched to the measured error.
+
+
+## L67bh-bi (2026-09-16) -- step 1: opp_elixir REPLICATES on 100:200: 0.73 vs 0.47 (+26); confirmed on 200 opponents
+- **Replication (a, n=100):** off_opp_elixir_slice2 0.73 (0.64-0.82) vs ctrl_slice2 0.47 (0.37-0.57) = **+26**; flips 30 to win / 4 away. Original slice: +16 (22/6). Combined 52/10 over 200 distinct held-out ghosts.
+- **Single switch == bundle on slice 2 (a):** +26 vs +24 (BA). Opponent elixir IS the scalars effect (~55-60% of the whole gap).
+- **Gate (a):** gate_slice2_10 reproduced ctrl_slice2's 10 records exactly; full control not re-run (determinism measured twice in BB) -- recorded as an evidence-based exception to the L67au rule.
+- **NOT established:** live transfer -- live feeds the model None today (play.student_opp_elixir=False); gain bounded by the estimator's accuracy, measured in step 2 (pending).
+- **Trap:** controls differ 5pp between slices, arms 5pp the other way; per-slice anchoring is not optional at n=100.
