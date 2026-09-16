@@ -39,14 +39,15 @@ from pipeline import vocab                                            # noqa: E4
 from pipeline.e1_pool import POOL_V1, load_pool_v1, select_split      # noqa: E402
 from pipeline.obs_contract import Unit, _phase, load_deck             # noqa: E402
 from pipeline.opp_est_audit import (                                  # noqa: E402
-    TrackedEstimator, TracedEstimator, _Det, b5_seed, card_cost, charge_diagnostics, classify_charge_reason,
-    dets_of_costed, dets_of_whitelisted, ghost_delivered_by_base, ghost_scripted_by_base, is_policy_tick,
-    load_detector_cards, mae, mean_bias, merge_base_ledgers, opp_play_flags, overcharge_table, percentile,
-    phase_from_flags, phase_of, run_traced_update, share_within, summarize_condition,
+    BASE_CONDS, TrackedEstimator, TrackedEstimatorV2, TracedEstimator, TracedEstimatorV2, _Det, _jsonable,
+    _RecorderDB, b5_seed, card_cost, charge_diagnostics, classify_charge_reason, cond_key, dets_of_costed,
+    dets_of_whitelisted, ghost_delivered_by_base, ghost_scripted_by_base, is_policy_tick, load_detector_cards,
+    mae, make_estimator, mean_bias, merge_base_ledgers, opp_play_flags, overcharge_table, percentile,
+    phase_from_flags, phase_of, run_traced_update, share_within, summarize_condition, tick_field,
 )
 
 from clashrl.cards import CardDB                                      # noqa: E402
-from clashrl.opponent_elixir import OpponentElixirEstimator           # noqa: E402
+from clashrl.opponent_elixir import OpponentElixirEstimator, V2_PARAMS   # noqa: E402
 
 
 def _db() -> CardDB:
@@ -638,6 +639,235 @@ class TestTracedEstimatorParityWithTrackedEstimator(unittest.TestCase):
         self.assertAlmostEqual(base._est, traced._est)
         self.assertEqual(base.charged_by_base, traced.charged_by_base)
         self.assertEqual(base._opp_spent, traced._opp_spent)
+
+
+class TestEstimatorNamingHelpers(unittest.TestCase):
+    """O13: cond_key/tick_field must reproduce the pre-O13 spelling exactly when only one estimator variant
+    is active (--estimator v1, the default, or --estimator v2 alone) -- section 4's "--estimator v1 output
+    identical to before"."""
+
+    def test_solo_mode_keys_match_pre_o13_spelling_exactly(self):
+        for base in BASE_CONDS:
+            for variant in ("v1", "v2"):
+                self.assertEqual(cond_key(base, variant, both=False), base)
+        self.assertEqual(tick_field("Aplus", "v1", False, "est"), "est_Aplus")
+        self.assertEqual(tick_field("A", "v1", False, "est"), "est_A")
+        self.assertEqual(tick_field("A_wl", "v1", False, "est"), "est_Awl")   # historical: no underscore
+        self.assertEqual(tick_field("B", "v1", False, "est"), "est_B")
+        self.assertEqual(tick_field("Aplus", "v1", False, "n_enemy_dets"), "n_enemy_dets_Aplus")
+
+    def test_both_mode_keys_are_suffixed(self):
+        self.assertEqual(cond_key("A", "v1", both=True), "A_v1")
+        self.assertEqual(cond_key("A", "v2", both=True), "A_v2")
+        self.assertEqual(cond_key("A_wl", "v2", both=True), "A_wl_v2")
+        self.assertEqual(tick_field("A_wl", "v1", True, "est"), "est_Awl_v1")
+        self.assertEqual(tick_field("A_wl", "v2", True, "est"), "est_Awl_v2")
+
+    def test_make_estimator_selects_class_and_forwards_v2_kwargs(self):
+        db = _db()
+        self.assertIsInstance(make_estimator("v1", db, traced=False, v2_kwargs=None), TrackedEstimator)
+        self.assertIsInstance(make_estimator("v1", db, traced=True, v2_kwargs=None), TracedEstimator)
+        v2 = make_estimator("v2", db, traced=False, v2_kwargs={"suppress_spawns": False})
+        self.assertIsInstance(v2, TrackedEstimatorV2)
+        self.assertFalse(v2.suppress_spawns)
+        self.assertTrue(v2.body_count)          # untouched kwarg keeps its default (True)
+        self.assertIsInstance(make_estimator("v2", db, traced=True, v2_kwargs=None), TracedEstimatorV2)
+
+
+class TestBothEstimatorsSameDetStream(unittest.TestCase):
+    """O13 section 4: '--estimator both produces both condition sets in a stub-driven run (no engine)' --
+    exercised at the estimator-wiring unit (run_match_audit itself needs a live engine end to end, per the
+    existing convention in TestChargeTraceOffProducesNoTrace above). Builds the SAME
+    {(base_cond, variant): estimator} structure run_match_audit builds for --estimator both, feeds BOTH
+    variants of condition 'A' the IDENTICAL det stream, and confirms they diverge exactly where O13's R1
+    (spawn suppression) predicts -- proof the two run side by side off one det stream, not two."""
+
+    def test_v1_and_v2_diverge_on_a_spawn_suppression_scenario(self):
+        class _CostMap:
+            """Per-base fake db (unlike this file's own ``_FakeDB``, which is single-cost-for-every-base) --
+            needed here so tombstone/skeletons price differently, the way R1's suppression scenario requires."""
+
+            def __init__(self, costs):
+                self._costs = dict(costs)
+
+            def elixir(self, base):
+                return self._costs.get(base)
+
+            def speed_tiles(self, base):
+                return None
+
+        db = _CostMap({"tombstone": 3.0, "skeletons": 1.0})
+        variants = ("v1", "v2")
+        estimators = {(base, variant): make_estimator(variant, db, traced=False, v2_kwargs=None)
+                     for base in BASE_CONDS for variant in variants}
+        for base in BASE_CONDS:
+            for variant in variants:
+                estimators[(base, variant)].reset(my_elixir=5.0, now=0.0)
+
+        # feed condition 'A' only (the scenario under test), both variants, the SAME det stream:
+        a_dets_seq = [
+            [_Det("tombstone", 0.50, 0.50, "enemy")],
+            [_Det("tombstone", 0.50, 0.50, "enemy"), _Det("skeletons", 0.55, 0.50, "enemy")],   # live-form spawn
+        ]
+        for i, dets in enumerate(a_dets_seq):
+            for variant in variants:
+                estimators[("A", variant)].update(5.0, dets, now=float(i))
+
+        v1_charged = estimators[("A", "v1")].charged_by_base
+        v2_charged = estimators[("A", "v2")].charged_by_base
+        self.assertIn("skeletons", v1_charged, "V1 must still over-bill the spawn (unchanged baseline)")
+        self.assertNotIn("skeletons", v2_charged, "V2's R1 must suppress the same spawn from the same dets")
+        self.assertEqual(v1_charged["tombstone"], v2_charged["tombstone"], "both charge the real play once")
+
+        both_mode = True
+        keyed = {cond_key(base, variant, both_mode): estimators[(base, variant)].charged_by_base
+                for base in BASE_CONDS for variant in variants}
+        self.assertIn("A_v1", keyed)
+        self.assertIn("A_v2", keyed)
+        self.assertNotEqual(keyed["A_v1"], keyed["A_v2"])
+
+
+class TestV2ParamsJsonSafe(unittest.TestCase):
+    """O13 attempt 2 FIX 1 (verifier, HIGH): summary["v2_params"] = V2_PARAMS raises TypeError at the END of
+    a full run (V2_PARAMS["spawns"] is dict[str, frozenset[str]]) -- _jsonable() must make a JSON-safe COPY
+    without mutating the live module's own SPAWNS/V2_PARAMS objects."""
+
+    def test_summary_with_v2_params_dumps_and_spawns_become_sorted_lists(self):
+        import json as _json
+        summary_stub = {"n_ticks": 10, "estimator": "v2", "v2_params": _jsonable(V2_PARAMS)}
+        dumped = _json.dumps(summary_stub)          # must not raise
+        reloaded = _json.loads(dumped)
+        spawns = reloaded["v2_params"]["spawns"]
+        self.assertIsInstance(spawns, dict)
+        for parent, members in spawns.items():
+            self.assertIsInstance(members, list, f"{parent}'s spawn set must serialize as a list")
+            self.assertEqual(members, sorted(members), f"{parent}'s spawn list must be sorted")
+
+    def test_jsonable_never_mutates_the_live_v2_params(self):
+        import copy
+        before = copy.deepcopy({k: (dict(v) if isinstance(v, dict) else v) for k, v in V2_PARAMS.items()
+                                if k != "spawns"})
+        spawns_before = {k: frozenset(v) for k, v in V2_PARAMS["spawns"].items()}
+        _jsonable(V2_PARAMS)
+        self.assertTrue(all(isinstance(v, frozenset) for v in V2_PARAMS["spawns"].values()),
+                        "the LIVE V2_PARAMS['spawns'] values must still be frozensets after _jsonable()")
+        self.assertEqual({k: frozenset(v) for k, v in V2_PARAMS["spawns"].items()}, spawns_before)
+
+
+class TestRecorderDBTransparentProxy(unittest.TestCase):
+    """O13 attempt 2 FIX 2 (verifier, HIGH): _RecorderDB must forward EVERY attribute of the wrapped db, not
+    just `elixir` -- otherwise OpponentElixirEstimatorV2's `getattr(self.db, "speed_tiles", None)` sees None
+    while wrapped by Tracked/TrackedEstimatorV2, and R3 (speed_aware_radius) silently goes inert INSIDE the
+    harness even though it is fully active on a bare (unwrapped) V2 instance."""
+
+    class _SpeedDB:
+        def __init__(self, costs, speeds):
+            self._c = dict(costs)
+            self._s = dict(speeds)
+
+        def elixir(self, base):
+            return self._c.get(base)
+
+        def speed_tiles(self, base):
+            return self._s.get(base)
+
+    def test_recorder_forwards_speed_tiles_unrecorded(self):
+        real = self._SpeedDB({"bandit": 3.0}, {"bandit": 8.0})
+        calls: list = []
+        proxy = _RecorderDB(real, calls)
+        self.assertEqual(proxy.speed_tiles("bandit"), 8.0)
+        self.assertEqual(proxy.elixir("bandit"), 3.0)
+        self.assertEqual(calls, [("bandit", 3.0)], "only elixir() calls are recorded, speed_tiles() is not")
+
+    def test_tracked_estimator_v2_r3_active_through_the_wrapper_matches_bare_v2(self):
+        """A bandit det moving 0.12 in 0.25s must be MATCHED (one charge total), through
+        TrackedEstimatorV2 exactly as it is on a bare OpponentElixirEstimatorV2 (icebow's own
+        test_opponent_elixir_v2.py) -- before FIX 2 this silently rebilled (a second charge) because the
+        OLD _RecorderDB dropped speed_tiles, so R3 never widened the match radius inside the wrapper."""
+        db = self._SpeedDB({"bandit": 3.0}, {"bandit": 8.0})
+        wrapped = TrackedEstimatorV2(db)
+        wrapped.reset(my_elixir=5.0, now=0.0)
+        wrapped.update(5.0, [_Det("bandit", 0.50, 0.5, "enemy")], now=0.0)
+        wrapped.update(5.0, [_Det("bandit", 0.62, 0.5, "enemy")], now=0.25)   # moved 0.12 in 0.25s
+        self.assertEqual(wrapped.charged_by_base, {"bandit": [1, 3.0]},
+                         "R3 must still be active through the wrapper -- exactly one charge, not two")
+        self.assertEqual(len(wrapped._tracks), 1, "dash must be matched to the SAME track, not rebilled")
+
+
+class TestTracedEstimatorV2ChargeAttribution(unittest.TestCase):
+    """O13 attempt 2 FIX 3 (verifier, MEDIUM): the verifier's exact case -- one update() call with THREE
+    dets: a det that refreshes an existing 'tombstone' track, a 'skeletons' det far away (a genuine new
+    play), and a second 'tombstone'-labeled det 0.08 from the live tombstone track (within r_spawn=0.084,
+    self-mapped R1 suppression -- a NEW track, but no charge). Exactly ONE trace row must result, correctly
+    attributed to 'skeletons', not misattributed by a positional zip against db.elixir() CALLS (which would
+    only make ONE call this update -- for skeletons -- while creating TWO new tracks)."""
+
+    class _CostDB:
+        def __init__(self, costs):
+            self._c = dict(costs)
+
+        def elixir(self, base):
+            return self._c.get(base)
+
+        def speed_tiles(self, base):
+            return None
+
+    def test_tombstone_live_skeletons_far_tombstone_dup_one_correct_trace_row(self):
+        db = self._CostDB({"tombstone": 3.0, "skeletons": 1.0})
+        est = TracedEstimatorV2(db)
+        est.reset(my_elixir=10.0, now=0.0)
+        t_to_tick: dict = {}
+        det0 = _Det("tombstone", 0.5, 0.5, "enemy")
+        ch0, _tr0 = run_traced_update(est, 10.0, [det0], 0.0, tick=0, tag="m1", k=0,
+                                      prev_dets=None, prev_t=None, t_to_tick=t_to_tick)
+        self.assertEqual(len(ch0), 1)          # the initial tombstone play itself
+
+        dets = [
+            _Det("tombstone", 0.5, 0.5, "enemy"),          # tombstone LIVE -- refreshes the existing track
+            _Det("skeletons", 0.5, 0.2, "enemy"),           # skeletons FAR -- genuine new play, must charge
+            _Det("tombstone", 0.5, 0.58, "enemy"),          # tombstone DUP @0.08 -- R1-suppressed, no charge
+        ]
+        ch1, _tr1 = run_traced_update(est, 10.0, dets, 1.0, tick=5, tag="m1", k=0,
+                                      prev_dets=[det0], prev_t=0.0, t_to_tick=t_to_tick)
+        self.assertEqual(len(ch1), 1, ch1)
+        row = ch1[0]
+        self.assertEqual(row["base"], "skeletons")
+        self.assertAlmostEqual(row["x"], 0.5, places=6)
+        self.assertAlmostEqual(row["y"], 0.2, places=6)
+        self.assertEqual(row["cost"], 1.0)
+        self.assertEqual(row["reason"], "first_seen")
+        self.assertEqual(len(est._tracks), 3, "tombstone (refreshed) + skeletons (new) + tombstone-dup (new)")
+
+
+class TestTicksRowKeyOrder(unittest.TestCase):
+    """O13 attempt 2 FIX 6b (verifier, LOW): --estimator v1 (default) must write ticks.jsonl rows with the
+    EXACT pre-O13 key order (every est_* field, then every n_enemy_dets_* field, then the three flags) so
+    existing line-diff / schema tooling built against the old shape keeps working. Reproduces
+    run_match_audit's own row-building sequence (est_vals computed per BASE_CONDS x variant, THEN two
+    separate assignment passes) at unit scope, since the full function needs a live engine end to end."""
+
+    def test_v1_solo_mode_row_key_order_matches_pre_o13_literal(self):
+        both_mode = False
+        variants = ("v1",)
+        est_vals = {(base, "v1"): 0.0 for base in BASE_CONDS}
+        n_by_base = {base: 0 for base in BASE_CONDS}
+
+        row = {"tag": "t", "k": 0, "tick": 0, "t_sec": 0.0, "phase": "single", "truth": 0.0, "truth_drop": 0.0}
+        for base in BASE_CONDS:
+            for variant in variants:
+                row[tick_field(base, variant, both_mode, "est")] = est_vals[(base, variant)]
+        for base in BASE_CONDS:
+            for variant in (variants if both_mode else variants[:1]):
+                row[tick_field(base, variant, both_mode, "n_enemy_dets")] = n_by_base[base]
+        row["is_opp_play_tick"] = False
+        row["is_my_play_tick"] = False
+        row["is_policy_tick"] = False
+
+        expected = ["tag", "k", "tick", "t_sec", "phase", "truth", "truth_drop",
+                   "est_Aplus", "est_A", "est_Awl", "est_B",
+                   "n_enemy_dets_Aplus", "n_enemy_dets_A", "n_enemy_dets_Awl", "n_enemy_dets_B",
+                   "is_opp_play_tick", "is_my_play_tick", "is_policy_tick"]
+        self.assertEqual(list(row.keys()), expected)
 
 
 if __name__ == "__main__":

@@ -196,7 +196,9 @@ from pipeline import engine_play as ep                                          
 
 from clashrl.cards import CardDB                                                   # noqa: E402
 from clashrl.config import Config                                                  # noqa: E402
-from clashrl.opponent_elixir import OpponentElixirEstimator                        # noqa: E402
+from clashrl.opponent_elixir import (                                              # noqa: E402
+    OpponentElixirEstimator, OpponentElixirEstimatorV2, V2_PARAMS,
+)
 
 
 STEP_TICKS = 5              # CHANGE 1: estimator update cadence (engine ticks); must divide --decide-every
@@ -302,11 +304,14 @@ def card_cost(db: CardDB, cls_id: int) -> Optional[int]:
 # not a reimplementation of update()) is the faithful way to get this without touching opponent_elixir.py.
 # ------------------------------------------------------------------------------------------------------
 class _RecorderDB:
-    """One-shot proxy: forwards ``.elixir(base)`` to the REAL db and records every (base, cost) call made
-    while it is installed. Nothing else of CardDB is used inside ``OpponentElixirEstimator.update()``, so
-    forwarding only ``elixir`` is sufficient (an AttributeError on anything else would mean update() started
-    reading something new from db and this proxy needs a second look, which is exactly the failure mode we
-    WANT if opponent_elixir.py ever changes underneath this harness)."""
+    """Transparent proxy: forwards ``.elixir(base)`` to the REAL db and records every (base, cost) call made
+    while it is installed, and forwards EVERY OTHER attribute (e.g. V2's ``.speed_tiles(base)``) straight
+    through via ``__getattr__`` -- unrecorded, but never dropped. FIX 2 (O13 attempt 2 verifier, HIGH):
+    before this, only ``elixir`` was forwarded, so ``OpponentElixirEstimatorV2._speed_radius``'s
+    ``getattr(self.db, "speed_tiles", None)`` saw None while wrapped by ``TrackedEstimator[V2]``/
+    ``TracedEstimator[V2]`` -- R3 (speed_aware_radius) silently went inert INSIDE the harness even though the
+    bare estimator (as exercised directly in icebow/tests/test_opponent_elixir_v2.py) has it fully working,
+    so the audit would have measured a different estimator than the one the unit tests cover."""
 
     def __init__(self, real_db, calls: list):
         self._real = real_db
@@ -317,15 +322,19 @@ class _RecorderDB:
         self._calls.append((base, c))
         return c
 
+    def __getattr__(self, name):
+        # only reached for attributes NOT found on this proxy itself (i.e. anything but elixir/_real/_calls)
+        return getattr(self._real, name)
 
-class TrackedEstimator(OpponentElixirEstimator):
-    """``OpponentElixirEstimator`` with a per-instance ``charged_by_base`` ledger, built by intercepting the
-    ONE ``self.db.elixir(base)`` call ``update()`` makes per new track (opponent_elixir.py:109) -- never by
-    re-deriving which dets are "new" ourselves (that would duplicate ``_find_track``/``_cluster_new`` and
-    could drift from the real matching/clustering radii)."""
 
-    def __init__(self, db):
-        super().__init__(db)
+class _TrackedMixin:
+    """``**kwargs`` forwarded to the underlying estimator's ``__init__`` -- with none, byte-identical to the
+    original ``TrackedEstimator(db)`` shape (O10); ``TrackedEstimatorV2`` (O13) reuses this same mixin to
+    wrap ``OpponentElixirEstimatorV2`` instead, forwarding its ablation kwargs (suppress_spawns=, etc.)
+    through the SAME db-wrapping instrumentation -- no charging/tracking logic is duplicated either way."""
+
+    def __init__(self, db, **kwargs):
+        super().__init__(db, **kwargs)
         self.charged_by_base: dict[str, list] = {}   # base -> [n_charges, total_elixir_charged]
         self.last_calls: list[tuple[str, Optional[float]]] = []   # O10: this update() call's raw db.elixir()
                                                                     # calls (base, cost), in _cluster_new order --
@@ -349,20 +358,34 @@ class TrackedEstimator(OpponentElixirEstimator):
         return result
 
 
+class TrackedEstimator(_TrackedMixin, OpponentElixirEstimator):
+    """``OpponentElixirEstimator`` (V1) with a per-instance ``charged_by_base`` ledger -- UNCHANGED from
+    before O13 (same name, same behavior; existing tests/callers construct it as ``TrackedEstimator(db)``)."""
+
+
+class TrackedEstimatorV2(_TrackedMixin, OpponentElixirEstimatorV2):
+    """O13: the same db-wrapping charge ledger, wrapping ``OpponentElixirEstimatorV2`` instead -- lets the
+    harness measure V2's ``charged_by_base``/over-charge ledger side by side with V1's, from the SAME
+    instrumentation, with NO duplicated tracking/matching/clustering/suppression logic. Extra kwargs
+    (``suppress_spawns=``, ``body_count=``, ``speed_aware_radius=``, ...) pass straight through to
+    ``OpponentElixirEstimatorV2.__init__``."""
+
+
 # ------------------------------------------------------------------------------------------------------
 # TICKET O10: charge-event / track-expiry trace -- see module docstring for the full design rationale.
 # ------------------------------------------------------------------------------------------------------
-class TracedEstimator(TrackedEstimator):
-    """``TrackedEstimator`` plus two mechanical, read-only observations of the SAME unmodified super() calls:
-    ``last_charges`` (this update() call's newly-tracked, cost > 0 bases with (x, y, cost, n_tracks_before,
-    n_tracks_after)) and ``last_expired`` (this update() call's track EXPIRIES, i.e. every track
-    ``_seen_tracks`` actually dropped). Neither re-implements matching/clustering/forgetting -- both are
-    diffs of ``self._tracks`` around the real, unmodified super() calls, by object identity (track dicts are
-    mutated in place when refreshed, and are only ever created fresh by ``_cluster_new``'s loop, so identity
-    alone tells 'refreshed' from 'new' or 'gone' correctly)."""
+class _TracedMixin:
+    """``TrackedEstimator``/``TrackedEstimatorV2`` plus two mechanical, read-only observations of the SAME
+    unmodified super() calls: ``last_charges`` (this update() call's newly-tracked, cost > 0 bases with (x,
+    y, cost, n_tracks_before, n_tracks_after)) and ``last_expired`` (this update() call's track EXPIRIES,
+    i.e. every track ``_seen_tracks`` actually dropped). Neither re-implements matching/clustering/
+    forgetting -- both are diffs of ``self._tracks`` around the real, unmodified super() calls, by object
+    identity (track dicts are mutated in place when refreshed, and are only ever created fresh inside the
+    estimator's own clustering loop, so identity alone tells 'refreshed' from 'new' or 'gone' correctly, for
+    EITHER estimator version)."""
 
-    def __init__(self, db):
-        super().__init__(db)
+    def __init__(self, db, **kwargs):
+        super().__init__(db, **kwargs)
         self.last_charges: list[dict] = []
         self.last_expired: list[dict] = []
 
@@ -381,17 +404,39 @@ class TracedEstimator(TrackedEstimator):
         before_ids = {id(tr) for tr in tracks_before}
         n_before = len(tracks_before)
         result = super().update(my_elixir, enemy_dets, now)   # real _seen_tracks (via our override above) +
-                                                                 # real match/cluster/charge (via TrackedEstimator)
-        new_tracks = [tr for tr in self._tracks if id(tr) not in before_ids]   # _cluster_new append order
+                                                                 # real match/cluster/charge (via the Tracked mixin)
+        new_tracks = [tr for tr in self._tracks if id(tr) not in before_ids]   # cluster-append order
         n_after = len(self._tracks)
         charges = []
-        for tr, (base, cost) in zip(new_tracks, self.last_calls):
-            cf = float(cost or 0.0)
-            if cf > 0.0:                                # same charge gate as charged_by_base
-                charges.append({"base": tr["base"], "x": tr["x"], "y": tr["y"], "cost": cf,
-                                "n_tracks_before": n_before, "n_tracks_after": n_after})
+        v2_ledger = getattr(self, "last_new_tracks", None)   # O13 attempt 2 FIX 3 -- V2 only (None for V1)
+        if v2_ledger is not None:
+            # V2: attribute EXACTLY via its own per-track (base, x, y, charged, cost) ledger, in the SAME
+            # creation order as new_tracks -- never a positional zip against db.elixir() CALLS, which breaks
+            # as soon as any new track is spawn-suppressed (R1) or body-count-absorbed (R2) without a call.
+            for tr, (_base, _x, _y, charged, cost) in zip(new_tracks, v2_ledger):
+                if charged:
+                    charges.append({"base": tr["base"], "x": tr["x"], "y": tr["y"], "cost": float(cost),
+                                    "n_tracks_before": n_before, "n_tracks_after": n_after})
+        else:
+            # V1: every new track makes EXACTLY one db.elixir() call (one charge per cluster, unconditionally
+            # -- opponent_elixir.py's original update()), so this positional zip is exact. UNCHANGED from
+            # before O13 attempt 2.
+            for tr, (base, cost) in zip(new_tracks, self.last_calls):
+                cf = float(cost or 0.0)
+                if cf > 0.0:                            # same charge gate as charged_by_base
+                    charges.append({"base": tr["base"], "x": tr["x"], "y": tr["y"], "cost": cf,
+                                    "n_tracks_before": n_before, "n_tracks_after": n_after})
         self.last_charges = charges
         return result
+
+
+class TracedEstimator(_TracedMixin, TrackedEstimator):
+    """UNCHANGED from before O13 (same name, same behavior; constructed as ``TracedEstimator(db)``)."""
+
+
+class TracedEstimatorV2(_TracedMixin, TrackedEstimatorV2):
+    """O13: the same charge/expiry trace, over ``OpponentElixirEstimatorV2``. Constructed as
+    ``TracedEstimatorV2(db, **v2_kwargs)``."""
 
 
 def _dist(ax: float, ay: float, bx: float, by: float) -> float:
@@ -658,19 +703,70 @@ def summarize_condition(rows: list[dict], est_key: str) -> dict:
 
 
 # ------------------------------------------------------------------------------------------------------
-# one match, three conditions, per-tick rows at STEP_TICKS cadence
+# O13: BASE_CONDS x estimator variant -- run_match_audit builds one TrackedEstimator[V2] per (base
+# condition, variant) pair. Field/condition-key naming is UNCHANGED (Aplus/A/A_wl/B, est_Aplus/est_A/
+# est_Awl/est_B) whenever only ONE variant is active (the default ``--estimator v1`` reproduces the exact
+# pre-O13 shape; ``--estimator v2`` reuses the same names, just backed by V2 instances) -- keys only grow a
+# ``_v1``/``_v2`` suffix under ``--estimator both``, per the ticket's "A_v1, A_v2, A_wl_v1, A_wl_v2, ..."
+# ------------------------------------------------------------------------------------------------------
+BASE_CONDS: tuple[str, ...] = ("Aplus", "A", "A_wl", "B")
+_HIST_FIELD = {"Aplus": "Aplus", "A": "A", "A_wl": "Awl", "B": "B"}   # historical (pre-O13) field spelling
+
+
+def cond_key(base: str, variant: str, both: bool) -> str:
+    """Condition key for summary.json / charged_by_base (e.g. 'A', or 'A_v2' under --estimator both)."""
+    return f"{base}_{variant}" if both else base
+
+
+def tick_field(base: str, variant: str, both: bool, prefix: str) -> str:
+    """Per-tick column name (e.g. 'est_Awl', or 'est_Awl_v2' under --estimator both) -- historical spelling
+    preserved so ``--estimator v1`` (default) never changes ticks.jsonl's shape."""
+    name = f"{prefix}_{_HIST_FIELD[base]}"
+    return f"{name}_{variant}" if both else name
+
+
+def make_estimator(variant: str, db: CardDB, traced: bool, v2_kwargs: Optional[dict]):
+    """One (base-condition-agnostic) estimator instance for ``variant`` ('v1'/'v2'), traced iff this is
+    condition A with --charge-trace set."""
+    if variant == "v2":
+        return (TracedEstimatorV2 if traced else TrackedEstimatorV2)(db, **(v2_kwargs or {}))
+    return (TracedEstimator if traced else TrackedEstimator)(db)
+
+
+def _jsonable(obj):
+    """O13 attempt 2 FIX 1 (verifier, HIGH): recursively convert ``set``/``frozenset`` values to sorted lists
+    so the result can pass through ``json.dumps`` -- used ONLY at the point ``V2_PARAMS`` is logged into
+    summary.json (``V2_PARAMS["spawns"]`` is ``dict[str, frozenset[str]]``; the un-converted dict raised
+    ``TypeError: Object of type frozenset is not JSON serializable`` at the very END of a full run, after
+    every match had already completed, losing summary.json/summary.md and the OPP_EST_AUDIT_DONE line).
+    Returns a NEW structure; never mutates the live module's own SPAWNS/BODIES/V2_PARAMS objects (which stay
+    frozensets/dicts, exactly as opponent_elixir.py defines them, for O(1) membership at runtime)."""
+    if isinstance(obj, (set, frozenset)):
+        return sorted(obj)
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    return obj
+
+
+# ------------------------------------------------------------------------------------------------------
+# one match, four conditions, per-tick rows at STEP_TICKS cadence -- one or two estimator variants each
 # ------------------------------------------------------------------------------------------------------
 def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict,
                     warned_costless: Optional[set] = None, whitelist: Optional[frozenset] = None,
-                    charge_trace: bool = False) -> tuple[list[dict], dict, list[dict], list[dict]]:
+                    charge_trace: bool = False, estimator: str = "v1",
+                    v2_kwargs: Optional[dict] = None) -> tuple[list[dict], dict, list[dict], list[dict]]:
     """Mirrors e1_eval.run_match's while-loop (same live policy, same accepted-play bookkeeping, IDENTICAL
-    decisions at IDENTICAL ticks) but steps the engine STEP_TICKS at a time, updates all four estimators
-    every step, and records a per-tick truth/estimate row instead of only a match summary. Returns
-    (ticks, match_summary, charge_rows, track_event_rows) -- the last two are always [] unless
-    ``charge_trace`` is set, in which case condition A's estimator becomes a ``TracedEstimator`` (module
-    docstring O10) and they carry this match's charge / track-expiry trace rows; every other condition
-    (A+, A_wl, B) is untouched regardless of this flag. ``whitelist``: FIX 4's ``load_detector_cards()``
-    result, required for A_wl."""
+    decisions at IDENTICAL ticks) but steps the engine STEP_TICKS at a time, updates every active
+    estimator every step from the SAME det stream per condition, and records a per-tick truth/estimate row
+    instead of only a match summary. ``estimator``: 'v1' (default -- byte-identical shape to before O13),
+    'v2', or 'both' (every condition run for BOTH estimators from the same dets, condition keys suffixed
+    '_v1'/'_v2' -- O13 ticket 3). Returns (ticks, match_summary, charge_rows, track_event_rows) -- the last
+    two are always [] unless ``charge_trace`` is set, in which case condition A's active variant(s) become
+    Traced* estimators (module docstring O10/O13) and rows carry an ``estimator`` field; every other
+    condition (A+, A_wl, B) is untouched regardless of this flag. ``whitelist``: FIX 4's
+    ``load_detector_cards()`` result, required for A_wl."""
     if warned_costless is None:
         warned_costless = set()
     if whitelist is None:
@@ -679,6 +775,10 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     decide_every = int(cfg["decide_every"])
     if decide_every % step != 0:
         raise SystemExit(f"--decide-every {decide_every} must be a multiple of --estimator-step {step}")
+    if estimator not in ("v1", "v2", "both"):
+        raise SystemExit(f"--estimator must be v1/v2/both, got {estimator!r}")
+    variants = ("v1", "v2") if estimator == "both" else (estimator,)
+    both_mode = len(variants) > 1
 
     t0 = time.perf_counter()
     state = env.reset(entry)
@@ -692,21 +792,18 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     done_plays: list[tuple[int, int, float, float]] = []
     last_play_tick: Optional[int] = None
     first_tick: Optional[int] = None
-    est_ap = TrackedEstimator(db)      # A+  : units + spells, engine truth, no whitelist
-    # O10: condition A ONLY becomes a TracedEstimator when --charge-trace is set; TrackedEstimator otherwise,
-    # byte-identical to before the flag existed (TracedEstimator IS-A TrackedEstimator, so est_a._est/
-    # est_a.charged_by_base are unaffected either way -- only the extra last_charges/last_expired bookkeeping
-    # is new, and nothing reads it unless charge_trace is True).
-    est_a = TracedEstimator(db) if charge_trace else TrackedEstimator(db)   # A: units only, no whitelist
-    est_wl = TrackedEstimator(db)      # A_wl: units only, engine truth, live's detector_cards whitelist (FIX 4)
-    est_b = TrackedEstimator(db)       # B   : units only, degraded live-like view
+    # O13: one estimator per (base condition, variant). Condition A's active variant(s) become Traced*
+    # when --charge-trace is set -- byte-identical to before O13 for the default v1-only, untraced-elsewhere
+    # case (TracedEstimator IS-A TrackedEstimator, so ._est/.charged_by_base are unaffected either way).
+    estimators = {(base, variant): make_estimator(variant, db, charge_trace and base == "A", v2_kwargs)
+                  for base in BASE_CONDS for variant in variants}
     inited = False
     prev_truth: Optional[float] = None
     ticks: list[dict] = []
-    charge_rows: list[dict] = []       # O10: condition A's charge trace (only ever populated if charge_trace)
-    track_event_rows: list[dict] = []  # O10: condition A's track-expiry trace (ditto)
-    prev_a_dets: Optional[list] = None # O10: PREVIOUS sample's condition-A det list, for charge_diagnostics
-    prev_a_t: Optional[float] = None   # O10: PREVIOUS sample's t_sec, for dt_since_prev_sample_s
+    charge_rows: list[dict] = []       # O10/O13: condition A's charge trace (only populated if charge_trace)
+    track_event_rows: list[dict] = []  # O10/O13: condition A's track-expiry trace (ditto)
+    prev_a_dets: Optional[list] = None # O10: PREVIOUS sample's condition-A det list (same for every variant,
+    prev_a_t: Optional[float] = None   # since all variants see the identical det stream), for charge_diagnostics
     t_to_tick: dict = {}                # O10: this match's t_sec -> tick map, for track_events' last_seen_tick
     n_dec = n_acc = 0
     max_ticks = int(cfg.get("max_ticks") or 0)
@@ -725,10 +822,10 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         # between (CHANGE 1 -- e1_eval has no cadence of its own for those).
         view = live_view(bs, rng_obs if pol_tick else rng_obs_b5, deck, Noise())
         if not inited:
-            est_ap.reset(my_elixir=bs.my_elixir, now=bs.t_sec)
-            est_a.reset(my_elixir=bs.my_elixir, now=bs.t_sec)
-            est_wl.reset(my_elixir=bs.my_elixir, now=bs.t_sec)
-            est_b.reset(my_elixir=view.my_elixir, now=bs.t_sec)
+            for base in BASE_CONDS:
+                my_e = view.my_elixir if base == "B" else bs.my_elixir
+                for variant in variants:
+                    estimators[(base, variant)].reset(my_elixir=my_e, now=bs.t_sec)
             inited = True
 
         truth = float(bs.opp_elixir)
@@ -740,31 +837,53 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         # value this harness grades is ``._est`` (set as a side effect of the same call, opponent_elixir.py
         # :130) -- attempt 1's section-1.9 near-miss. Call update() for its side effect, then read ``._est``.
         ap_dets = dets_of(bs.units) + dets_of_costed(bs.spells, db, warned_costless)
-        est_ap.update(bs.my_elixir, ap_dets, bs.t_sec)
-        est_ap_val = float(est_ap._est)
-        n_ap = n_enemy(bs.units) + n_enemy(bs.spells)
-
         a_dets = dets_of(bs.units)
+        wl_dets = dets_of_whitelisted(bs.units, whitelist)      # FIX 4
+        b_dets = dets_of(view.units)
+        dets_by_base = {"Aplus": (ap_dets, bs.my_elixir), "A": (a_dets, bs.my_elixir),
+                        "A_wl": (wl_dets, bs.my_elixir), "B": (b_dets, view.my_elixir)}
+        n_by_base = {"Aplus": n_enemy(bs.units) + n_enemy(bs.spells), "A": n_enemy(bs.units),
+                    "A_wl": sum(1 for d in wl_dets if d.team == "enemy"), "B": n_enemy(view.units)}
+
+        # O13 attempt 2 FIX 6b (verifier, LOW): compute every estimate FIRST, into a plain dict, then build
+        # `row` in two separate passes (all est_* fields, THEN all n_enemy_dets_* fields, THEN the three
+        # flags) -- this reproduces the PRE-O13 key ORDER exactly for --estimator v1 (the historical dict
+        # literal put every est_* field before every n_enemy_dets_* field, with the three flags last; a
+        # single combined per-condition loop, tried first, interleaved est_X/n_enemy_dets_X instead and
+        # moved the flags earlier, changing ticks.jsonl's line-for-line bytes even though the values were
+        # unchanged). Verified by TestTicksRowKeyOrder below: a stub v1-only row's ``list(row)`` matches the
+        # exact historical key sequence.
+        est_vals: dict[tuple[str, str], float] = {}
+        for base in BASE_CONDS:
+            dets, my_e = dets_by_base[base]
+            for variant in variants:
+                est = estimators[(base, variant)]
+                if base == "A" and charge_trace:
+                    ch_rows, tr_rows = run_traced_update(est, my_e, dets, bs.t_sec, tick, tag, k,
+                                                         prev_a_dets, prev_a_t, t_to_tick)
+                    for r in ch_rows:
+                        r["estimator"] = variant
+                    for r in tr_rows:
+                        r["estimator"] = variant
+                    charge_rows.extend(ch_rows)
+                    track_event_rows.extend(tr_rows)
+                else:
+                    est.update(my_e, dets, bs.t_sec)
+                est_vals[(base, variant)] = round(float(est._est), 4)
         if charge_trace:
-            ch_rows, tr_rows = run_traced_update(est_a, bs.my_elixir, a_dets, bs.t_sec, tick, tag, k,
-                                                 prev_a_dets, prev_a_t, t_to_tick)
-            charge_rows.extend(ch_rows)
-            track_event_rows.extend(tr_rows)
             prev_a_dets, prev_a_t = a_dets, bs.t_sec
-        else:
-            est_a.update(bs.my_elixir, a_dets, bs.t_sec)
-        est_a_val = float(est_a._est)
-        n_a = n_enemy(bs.units)
 
-        # FIX 4: A_wl -- perfect detection, units only, WITH live's detector_cards whitelist applied.
-        wl_dets = dets_of_whitelisted(bs.units, whitelist)
-        est_wl.update(bs.my_elixir, wl_dets, bs.t_sec)
-        est_wl_val = float(est_wl._est)
-        n_wl = sum(1 for d in wl_dets if d.team == "enemy")
-
-        est_b.update(view.my_elixir, dets_of(view.units), bs.t_sec)
-        est_b_val = float(est_b._est)
-        n_b = n_enemy(view.units)
+        row = {"tag": tag, "k": int(k), "tick": tick, "t_sec": round(bs.t_sec, 3), "phase": phase_of(bs),
+              "truth": truth, "truth_drop": round(truth_drop, 4)}
+        for base in BASE_CONDS:
+            for variant in variants:
+                row[tick_field(base, variant, both_mode, "est")] = est_vals[(base, variant)]
+        for base in BASE_CONDS:
+            for variant in (variants if both_mode else variants[:1]):
+                row[tick_field(base, variant, both_mode, "n_enemy_dets")] = n_by_base[base]
+        row["is_opp_play_tick"] = False   # FIX 2: filled in below from env.ghost_events, not here
+        row["is_my_play_tick"] = False
+        row["is_policy_tick"] = bool(pol_tick)
 
         # --- our own decision (same live rule as e1_eval.run_match), POLICY ticks only, unchanged cadence ---
         is_my_play_tick = False
@@ -785,21 +904,14 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
                     n_acc += 1
                     done_plays.append((tick, d["slot"], x, y))
                     last_play_tick = tick
-                    base = vocab.base_key(deck.cards[d["slot"]])
-                    est_ap.record_my_play(base)
-                    est_a.record_my_play(base)
-                    est_wl.record_my_play(base)
-                    est_b.record_my_play(base)
+                    base_key = vocab.base_key(deck.cards[d["slot"]])
+                    for base in BASE_CONDS:
+                        for variant in variants:
+                            estimators[(base, variant)].record_my_play(base_key)
                     is_my_play_tick = True
 
-        ticks.append({"tag": tag, "k": int(k), "tick": tick, "t_sec": round(bs.t_sec, 3), "phase": phase_of(bs),
-                     "truth": truth, "truth_drop": round(truth_drop, 4),
-                     "est_Aplus": round(est_ap_val, 4), "est_A": round(est_a_val, 4),
-                     "est_Awl": round(est_wl_val, 4), "est_B": round(est_b_val, 4),
-                     "n_enemy_dets_Aplus": n_ap, "n_enemy_dets_A": n_a, "n_enemy_dets_Awl": n_wl,
-                     "n_enemy_dets_B": n_b,
-                     "is_opp_play_tick": False,        # FIX 2: filled in below from env.ghost_events, not here
-                     "is_my_play_tick": bool(is_my_play_tick), "is_policy_tick": bool(pol_tick)})
+        row["is_my_play_tick"] = bool(is_my_play_tick)
+        ticks.append(row)
         prev_truth = truth
         if max_ticks and len(ticks) >= max_ticks:
             break
@@ -821,8 +933,8 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     ghost_scripted = ghost_scripted_by_base(entry, db, warned_costless)
     ghost_delivered = ghost_delivered_by_base(dict(env.ghost_cards_delivered), db, warned_costless)
     ghost_delivered_total = sum(v[1] for v in ghost_delivered.values())
-    charged_by_base = {"Aplus": dict(est_ap.charged_by_base), "A": dict(est_a.charged_by_base),
-                       "A_wl": dict(est_wl.charged_by_base), "B": dict(est_b.charged_by_base)}
+    charged_by_base = {cond_key(base, variant, both_mode): dict(estimators[(base, variant)].charged_by_base)
+                       for base in BASE_CONDS for variant in variants}
     over_charge_at_end = {cond: round(sum(v[1] for v in d.values()) - ghost_delivered_total, 2)
                           for cond, d in charged_by_base.items()}
     summary = {"tag": tag, "k": int(k), "n_ticks": len(ticks), "decisions": n_dec, "plays_accepted": n_acc,
@@ -866,7 +978,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--charge-trace", action="store_true", help="O10: for condition A ONLY, write "
                     "<out>/charges.jsonl (one row per _opp_spent charge, with diagnostics + a best-effort "
                     "reason) and <out>/track_events.jsonl (one row per track expiry). No fix -- "
-                    "instrumentation only; off by default and produces no new files / no summary change.")
+                    "instrumentation only; off by default and produces no new files / no summary change. "
+                    "O13: with --estimator v2/both, this also traces the v2 A condition (rows carry an "
+                    "'estimator' field).")
+    ap.add_argument("--estimator", choices=("v1", "v2", "both"), default="v1", help="O13: which "
+                    "OpponentElixirEstimator[V2] backs every condition (A+/A/A_wl/B). 'v1' (default) is "
+                    "byte-identical in shape to before O13. 'both' runs every condition for BOTH "
+                    "estimators from the same det stream, condition keys suffixed _v1/_v2.")
     ap.add_argument("--out", type=Path, required=True)
     return ap
 
@@ -931,7 +1049,7 @@ def main(argv=None) -> int:
                 try:
                     match_rows, msummary, ch_rows, tr_rows = run_match_audit(
                         env, model, deck, db, entry, k, cfg, warned_costless, whitelist,
-                        charge_trace=charge_trace)
+                        charge_trace=charge_trace, estimator=a.estimator)
                 except Exception as exc:
                     print(f"[opp_est_audit] ERROR on {entry['tag']} k={k}: {exc!r}", flush=True)
                     return 3
@@ -960,9 +1078,19 @@ def main(argv=None) -> int:
         if track_events_fh is not None:
             track_events_fh.close()
 
-    conds = (("Aplus_perfect_detection_with_spells", "est_Aplus", "Aplus"),
-             ("A_perfect_detection", "est_A", "A"), ("A_wl_live_whitelist", "est_Awl", "A_wl"),
-             ("B_degraded_live", "est_B", "B"))
+    # O13: which estimator variant(s) back every condition -- 'v1' (default) keeps every key below
+    # UNSUFFIXED, byte-identical to before O13; 'both' suffixes every key '_v1'/'_v2' (ticket 3).
+    variants = ("v1", "v2") if a.estimator == "both" else (a.estimator,)
+    both_mode = len(variants) > 1
+    COND_DEFS = (("Aplus_perfect_detection_with_spells", "Aplus"), ("A_perfect_detection", "A"),
+                ("A_wl_live_whitelist", "A_wl"), ("B_degraded_live", "B"))
+
+    def long_key(long_name: str, variant: str) -> str:
+        return f"{long_name}_{variant}" if both_mode else long_name
+
+    conds = [(long_key(long_name, variant), tick_field(base, variant, both_mode, "est"),
+             cond_key(base, variant, both_mode))
+            for long_name, base in COND_DEFS for variant in variants]
     # FIX 1: ghost_delivered_run is THE truth ledger fed to every overcharge_table below; ghost_scripted_run
     # is carried in summary.json for reference only and is never used in an over-charge computation.
     ghost_delivered_run = merge_base_ledgers([m["ghost_delivered_by_base"] for m in match_summaries])
@@ -984,8 +1112,13 @@ def main(argv=None) -> int:
                                         for m in match_summaries],
         "ghost_delivered_by_base": ghost_delivered_run,             # the truth ledger over-charge uses
         "ghost_scripted_by_base": ghost_scripted_run,                # REFERENCE ONLY -- not used for over-charge
+        "estimator": a.estimator,
         "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    if "v2" in variants:
+        # FIX 1: _jsonable() converts V2_PARAMS["spawns"]'s frozensets to sorted lists for THIS logged copy
+        # only -- the live opponent_elixir.V2_PARAMS/SPAWNS/BODIES objects are never touched.
+        summary["v2_params"] = _jsonable(V2_PARAMS)    # O13 ticket 3: every V2 default constant, for the record
     for key, est_key, cond in conds:
         summary[key] = summarize_condition(all_rows, est_key)
         charged_run = merge_base_ledgers([m["charged_by_base"][cond] for m in match_summaries])
@@ -997,10 +1130,12 @@ def main(argv=None) -> int:
          f"estimator_step={cfg['estimator_step']}", "",
          "| condition | MAE | bias | P90\\|err\\| | share<=1.0 | share<=2.0 |",
          "|---|---|---|---|---|---|"]
-    labels = {"Aplus_perfect_detection_with_spells": "A+ perfect detection (+spells, no whitelist)",
-             "A_perfect_detection": "A perfect detection (units only, NO whitelist -- loose upper bound)",
-             "A_wl_live_whitelist": "A_wl perfect detection (units only, live's detector_cards whitelist)",
-             "B_degraded_live": "B degraded (live)"}
+    BASE_LABELS = {"Aplus_perfect_detection_with_spells": "A+ perfect detection (+spells, no whitelist)",
+                  "A_perfect_detection": "A perfect detection (units only, NO whitelist -- loose upper bound)",
+                  "A_wl_live_whitelist": "A_wl perfect detection (units only, live's detector_cards whitelist)",
+                  "B_degraded_live": "B degraded (live)"}
+    labels = {long_key(long_name, variant): BASE_LABELS[long_name] + (f" [{variant}]" if both_mode else "")
+             for long_name, _base in COND_DEFS for variant in variants}
     for key, _, _cond in conds:
         m = summary[key]
         md.append(f"| {labels[key]} | {m['mae']} | {m['mean_bias']} | {m['p90_abs_err']} | "
@@ -1031,19 +1166,26 @@ def main(argv=None) -> int:
         md.append("  (top 10 shown here; top 25 in summary.json)")
         md.append("")
     (out / "summary.md").write_text("\n".join(md), encoding="utf-8")
-    print(json.dumps({"OPP_EST_AUDIT_DONE": {
+    # O13: generalized over every active (base condition, variant) pair -- for solo v1/v2 mode this produces
+    # the EXACT SAME flat keys as before O13 (Aplus_mae, A_mae, A_wl_mae, A_wl_total_over_charge, ...); under
+    # --estimator both each key grows a _v1/_v2 suffix (Aplus_v1_mae, A_wl_v2_total_over_charge, ...).
+    done_metrics: dict[str, Any] = {
         "n_ticks": summary["n_ticks"], "n_matches": summary["n_matches"],
         "matches": summary["matches"],                            # FIX 3: fidelity gate vs ctrl_live100
         "plays_accepted_by_match": summary["plays_accepted_by_match"],
-        "Aplus_mae": summary["Aplus_perfect_detection_with_spells"]["mae"],
-        "A_mae": summary["A_perfect_detection"]["mae"], "A_bias": summary["A_perfect_detection"]["mean_bias"],
-        "A_wl_mae": summary["A_wl_live_whitelist"]["mae"], "A_wl_bias": summary["A_wl_live_whitelist"]["mean_bias"],
-        "B_mae": summary["B_degraded_live"]["mae"], "B_bias": summary["B_degraded_live"]["mean_bias"],
-        "A_wl_total_over_charge": summary["A_wl_live_whitelist"]["overcharge"]["total_over_charge"],
-        "A_wl_over_charge_share_never_played": summary["A_wl_live_whitelist"]["overcharge"][
-            "over_charge_share_from_bases_never_played"],
-        "A_wl_over_charge_top3": summary["A_wl_live_whitelist"]["overcharge"]["top"][:3],
-    }}), flush=True)
+    }
+    for long_name, base in COND_DEFS:
+        for variant in variants:
+            m = summary[long_key(long_name, variant)]
+            tag = f"{base}_{variant}" if both_mode else base
+            done_metrics[f"{tag}_mae"] = m["mae"]
+            done_metrics[f"{tag}_bias"] = m["mean_bias"]
+            if base == "A_wl":
+                done_metrics[f"{tag}_total_over_charge"] = m["overcharge"]["total_over_charge"]
+                done_metrics[f"{tag}_over_charge_share_never_played"] = m["overcharge"][
+                    "over_charge_share_from_bases_never_played"]
+                done_metrics[f"{tag}_over_charge_top3"] = m["overcharge"]["top"][:3]
+    print(json.dumps({"OPP_EST_AUDIT_DONE": done_metrics}), flush=True)
     return 0
 
 
