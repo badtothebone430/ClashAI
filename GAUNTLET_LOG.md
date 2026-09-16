@@ -1866,3 +1866,13 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **B is an upper bound (b):** degrade() noise is i.i.d. per sample; real tracks persist. True live error in [2.35, 5.90].
 - **Verifier caught a real bug (a):** attempt-3 truth ledger used scripted (3,796) not delivered (2,429) plays.
 - **v7 consequence (b):** training on today's error teaches the model to ignore the feature (= status quo). Fix + re-measure the estimator first. Proposals: charge-event trace; first-appearance charging + body-count clustering + TeamTracker input; effect-zone classes for spells; then v7.
+
+
+## L67bk-bm (2026-09-16) -- estimator diagnosed (spawns + body splits + fast movers) and V2 measured: -57% over-billing under perfect detection, ~no change under the live view
+- **Trace (a, 5 matches, 195 charges):** first_seen 70; split 92 = SPAWNER OUTPUT under the parent's name (tombstone 27, witch 14, night_witch 8) + body splits; out_of_radius 25 (bandit dash, median jump 0.113); after_expiry 6. forget_s not the bug (all expiries 6.25 s). **My BD retraction of the spawn hypothesis was wrong.**
+- **V2 (R1 spawn suppression r_spawn 0.084 / R2 body counts / R3 speed radius), V1 byte-untouched; verifier caught an end-of-run json crash + R3 silently off in the harness before the engine ran.**
+- **Side-by-side (a, n=100, same det stream, fidelity 100/100):** A: MAE 2.51 -> 2.01, bias -1.95 -> -1.20, charged +76% -> +32%, pinned 18% -> 11%. A_wl: 2.35 -> 2.32. **B (live view): 5.90 -> 5.81, pinned 92.9% -> 91.0%, 18x -> 15x.**
+- **Fixed (a):** tombstone 442 -> ~58, skeleton_army 199 -> 77, goblin_gang out, royal_hogs 197 -> 120. **Remaining (a), named (b):** miner 201 (burrow re-sighting), barbarians 166 (absorption window 1 s << body lifetime), skeleton_barrel 85 / goblins 91 (SPAWNS gaps), witch 84 (r_spawn too tight).
+- **Not fixable on raw dets (a):** knight 65 plays -> 1,289 charges under B. Design change: bill on NEW TeamTracker track IDs (min_hits=2), measurable as B_tt; caveat: i.i.d. degrade makes B_tt optimistic where B is pessimistic -> needs a temporally correlated degrade variant.
+- **Step 3 (a, live, 8084aad):** unanchored NON-deck zones -> enemy (old side-prior tagged enemy poison on my tower as 'mine'); deck-owned zones unchanged (guard). Whitelist prepared, moot while student_opp_elixir=False.
+- **Live status:** estimator OFF live; +16/+26 unrealised. **Next (b):** V2.1 rules (~40 min); B_tt + correlated degrade; only then wire live + v7.
