@@ -1836,3 +1836,14 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Scale (a):** ~+22pp mean vs a total gap of +38/+40 -- scalars carries ~55-60% of it; the other six arms sum ~+12, none individually distinguishable from zero.
 - **NOT established:** which of the THREE bundled things (exact my_elixir / true opp_elixir / king hp_frac) carries it; live transfer (live already wires opp_elixir, floors my_elixir); single ckpt/tau/seed.
 - **Next (proposed, not started):** split the switch into 3 and run 3 arms + own control, ~1.5 h engine.
+
+
+## L67bc-bg (2026-09-16) -- scalars bundle SPLIT: opponent elixir is the lever (+16 of +20); own elixir 0; king HP +3; additive
+- **Foreman run 2:** O5 split Noise.scalars -> my_elixir/opp_elixir/king_hp (alias kept); verifier PASS_WITH_NOTES (own golden from git show 4bca159, 40/40; RNG state identical per switch); tests hardened (damaged-kings golden, 31 OK). Commits a58412e, eb808e2.
+- **Gate (a):** gate_split3 0.72 == AZ off_scalars 0.72, and 100/100 per-match records identical (only wall_s). Same instrument.
+- **Split (a, n=100, entries 0:100, vs control 0.52):** my_elixir 0.52 (+0; 26 flips, symmetric) | **opp_elixir 0.68 (+16; 22 to win / 6 away)** | king_hp 0.55 (+3; 7 flips) | all three 0.72 (+20). 0+16+3=19 vs 20 -- additive.
+- **ctrl_split (fresh control, same batch, port 38031):** 0.52 -- 100/100 records identical to AZ's ctrl_live100 (port 38032). Cross-service determinism measured; the two ports are interchangeable.
+- **Lean contradicted (c, mine):** "two of three are cheap reader fixes" -- own-elixir precision is worth nothing.
+- **Live (a):** opp_elixir already fed from OpponentElixirEstimator (play-counting: reset 5.0, subtract cost per clustered new enemy deploy, regen, clamp). Accuracy never measured; error sources = detector misses, wrong identity, regen model.
+- **NOT established:** +16 is one slice (bundle replicated, switch alone not); live transfer bounded by unmeasured estimator accuracy; king_hp +3 within noise.
+- **Next (proposed):** replicate opp_elixir on 100:200; measure the estimator vs engine truth offline (engine deploys vs degraded view); v7 with opp_elixir noise matched to the measured error.

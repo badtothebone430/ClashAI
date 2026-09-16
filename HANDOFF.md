@@ -3402,6 +3402,42 @@ Both tau 0.24 runs pause more than the tau 0.27 run (22:48 run by video: 44% vs 
 *Immediate next experiment (b, not started, owner to approve).* Split `scalars` into three switches and run three arms on one slice with its own control (~1.5 h engine incl. boot): `my_elixir_exact`, `opp_elixir_known`, `king_hp`. That converts "+22pp lives somewhere in this bundle" into a named feature. Only then does the v7 observation work have a target, and two of the three candidates are reader-level fixes rather than detector projects.
 
 
+**BB. L67bc-bg -- THE SCALARS BUNDLE SPLIT (owner-approved 2026-09-16): OPPONENT ELIXIR is the lever (+16 of the +20); own-elixir precision is worth 0; king HP +3; the three are additive.** Foreman run 2 (ledger `.foreman/obs-attrib/ledger.md`): worker O5 split `Noise.scalars` into `my_elixir` / `opp_elixir` / `king_hp` (alias kept), blind verifier PASS_WITH_NOTES with its own golden from `git show 4bca159` (40/40 bit-identical, RNG state identical per switch), tests hardened after (damaged-kings golden that a forced no-op switch FAILS; 31 tests). Commits a58412e, eb808e2. Chain `chain_split_scalars.ps1` (pid 46088, 17:58Z -> ~19:50Z), same instrument as AZ/BA: v6lat_s0, live rule, tau 0.27, held-out entries 0:100, one switch at a time.
+
+*Results (a, n=100 per row, same 100 held-out opponents, scored by `pipeline/e1_score`; per-match flips vs the control from matches.jsonl).*
+
+| arm -- what the model is given | winrate | CI | vs control | outcome flips (to win / away) |
+|---|---|---|---|---|
+| CONTROL (AZ, `ctrl_live100`) | 0.52 | 0.42-0.62 | -- | -- |
+| `gate_split3` -- all three off (repro of AZ `off_scalars`) | **0.72** | 0.63-0.81 | +20 | *100/100 per-match records identical to off_scalars; only `wall_s` differs* |
+| `off_my_elixir` -- exact, unfloored own elixir | **0.52** | 0.42-0.62 | **+0** | 26 flips, 13/13 symmetric; crowns differ in ~half the matches |
+| `off_opp_elixir` -- true opponent elixir known | **0.68** | 0.59-0.77 | **+16** | **22 to win / 6 away**; plays differ in 95/100 |
+| `off_king_hp` -- true king tower hp | **0.55** | 0.45-0.65 | +3 | 5 to win / 2 away; plays differ in only 25/100 |
+| `ctrl_split` -- fresh control, same batch, run last | **0.52** | 0.42-0.62 | 0 | *100/100 per-match records identical to AZ's control, which ran on the OTHER engine service (38032 vs 38031)* |
+
+*Cross-service determinism (a, new).* The two controls -- one on port 38032 last night, one on 38031 today, identical settings -- agree in every non-timing field across all 100 matches. The two engine services are interchangeable instruments; a control need not be re-run per port. (It was still right to run it: that is now measured, not assumed.)
+
+*Reading (a).* The bundle decomposes cleanly: **0 + 16 + 3 = 19 against the bundled +20**, additive within a point. `off_opp_elixir` is the only single switch whose interval clears the control's (0.59 vs 0.62 -- a hair short by the unpaired CI, but the paired flip count, 22 vs 6, is not a coin-flip pattern). Own-elixir precision is a genuine null, not a no-op: the policy DOES use the fractional value (26 outcome flips, crowns differ in ~half the matches) and it nets to zero. King HP barely touches behaviour at all.
+
+*Gate (a).* `gate_split3` reproduced AZ's `off_scalars` **match-for-match** -- every outcome field identical across 100 matches, the sole difference being wall-clock. The split is bit-identical through the engine and the engine is deterministic, so the three arms sit on exactly the instrument that measured the bundled +20/+24.
+
+***My lean, contradicted.*** In AZ I wrote that "two of the three are reader-level fixes, not detector projects" -- own-elixir precision and king HP -- implying cheap wins. Own-elixir precision is worth **nothing**; king HP is worth +3 at best. The one that matters is the one whose live source already exists and has never been measured.
+
+*What carries it, and what live already has (a, `icebow/src/clashrl/opponent_elixir.py:20-60`, `obs_contract.py:477`).* The live path feeds `opp_elixir` from `OpponentElixirEstimator` -- a **play-counting** estimator, the technique pros use by hand: reset to 5.0 at match start, subtract each newly detected enemy card's cost (detections clustered by class + proximity so a swarm counts as one play), regenerate over time, clamp 0-10; `None` when it has nothing. Its error therefore has three separable sources: **detector misses on fresh deployments** (each one over-estimates the opponent's elixir), **wrong card identity** (wrong cost subtracted), and the **regen model** (single/double elixir, the cap). None of these has ever been measured.
+
+*What this does NOT establish.*
+- **The +16 is measured on ONE slice** (0:100). The bundle replicated on 100:200 (BA, +24); the `opp_elixir` switch alone has not. Cheap to close: one arm on 100:200 against the existing `ctrl_slice2` 0.47 (same port, same settings, same day) -- ~20 min + boot.
+- **Live transfer.** Engine eval vs recorded ghosts, not live play. Live already supplies an *estimate*; the +16 is for the *truth*. The live-side gain is bounded by the estimator's accuracy, which is unknown.
+- n=100 per cell (+-10pp): king_hp's +3 is not distinguishable from 0.
+- Single checkpoint, tau, seed.
+- Contention window (a): 18:4x-19:0xZ the box sat at 100% CPU from the owner's MedalEncoder/Roblox Studio; `wall_s` in `off_opp_elixir` is inflated ~2x for that stretch. Results unaffected (deterministic).
+
+*Proposed next steps (b, none started).*
+1. **Replicate `off_opp_elixir` on 100:200** vs `ctrl_slice2` -- the disjoint-slice rule applied to the single switch, not just the bundle. ~35 min.
+2. **Measure `OpponentElixirEstimator` against engine truth, offline** -- the engine knows the opponent's true elixir every tick. Run the estimator's logic over engine matches twice: fed the engine's own deploy events (perfect detection; isolates regen-logic error) and fed the degraded live view (adds detector-induced error). Report MAE/bias per condition, by match phase. No live play needed.
+3. **S1 v7 with `opp_elixir` noise matched to the measured estimator error** -- the v6aug recipe (train on the degradation you will actually see live) applied to the one scalar that carries the gap. Only then does live play test whether the +16 transfers.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
