@@ -37,6 +37,7 @@ from __future__ import annotations
 import math
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -54,13 +55,15 @@ from pipeline.obs_contract import (                                   # noqa: E4
     TOWER_ORDER, TILES_X, TILES_Y, DEGRADE_PRECISION, DEGRADE_RECALL, BoardState, Tower, Unit, _phase, load_deck,
 )
 from pipeline.opp_est_audit import (                                  # noqa: E402
-    BASE_CONDS, TrackedEstimator, TrackedEstimatorV2, TracedEstimator, TracedEstimatorV2, _Det,
-    _jsonable, _RecorderDB, active_base_conds, b5_seed, build_cond_defs, card_cost, charge_diagnostics,
-    classify_charge_reason, cond_key, corrL_seed, corrS_seed, dets_of, dets_of_costed, dets_of_whitelisted,
-    filter_whitelisted_billed_dets, ghost_delivered_by_base, ghost_scripted_by_base, is_policy_tick,
-    load_detector_cards, mae, make_estimator, make_team_tracker, mean_bias, merge_base_ledgers,
-    opp_play_flags, overcharge_table, percentile, phase_from_flags, phase_of, run_traced_update,
-    share_within, summarize_condition, tick_field, tt_bill_dets, tt_dets_of,
+    BASE_CONDS, FEED_NOISE_MODES, FEED_OPP_ELIXIR_MODES, TrackedEstimator, TrackedEstimatorV2,
+    TracedEstimator, TracedEstimatorV2, _Det,
+    _jsonable, _RecorderDB, active_base_conds, b5_seed, build_cond_defs, build_parser, card_cost,
+    charge_diagnostics, classify_charge_reason, cond_key, corrL_seed, corrS_seed, dets_of, dets_of_costed,
+    dets_of_whitelisted, feed_condition_key, filter_whitelisted_billed_dets, ghost_delivered_by_base,
+    ghost_scripted_by_base, is_policy_tick, load_detector_cards, mae, make_estimator, make_team_tracker,
+    mean_bias, merge_base_ledgers, opp_play_flags, overcharge_table, percentile, phase_from_flags,
+    phase_of, policy_view_for, run_traced_update, share_within, summarize_condition, tick_field,
+    tt_bill_dets, tt_dets_of, validate_feed_config,
 )
 from pipeline.opp_est_degrade_corr import (                           # noqa: E402
     CORR_LONG, CORR_SHORT, CorrParams, corr_live_view, markov_params, new_state,
@@ -1283,6 +1286,230 @@ class TestCorrLiveViewSmoke(unittest.TestCase):
                 self.assertIn(u.side, (-1, 0, 1))
         # unit B (cls=9) left the board at step 6 -- its track must be dropped, not leaked forever
         self.assertFalse(any(tr.get("cls") == 9 for tr in state.get("units", {}).values()))
+
+
+# ------------------------------------------------------------------------------------------------------
+# TICKET O18: feed the opponent-elixir observation into the BoardState the policy consumes.
+# ------------------------------------------------------------------------------------------------------
+class _FakeEst:
+    """Stand-in for a TrackedEstimatorV2 in ``policy_view_for``'s ``estimators`` dict -- only ``._est`` is
+    ever read by the function under test, so a bare attribute holder is faithful and avoids depending on
+    the real estimator's internal update() sequencing for these pure-injection tests."""
+    def __init__(self, est: float):
+        self._est = float(est)
+
+
+class TestPolicyViewForOff(unittest.TestCase):
+    """Acceptance (a): --feed-opp-elixir off (the default) leaves the policy's observation BYTE-IDENTICAL
+    to every pre-O18 invocation -- proven here as object identity (not just equal fields): run_match_audit
+    passes this return value straight to to_tokens(), so returning the SAME object it was given means
+    zero behaviour change, not merely a coincidentally-equal copy."""
+
+    def test_off_returns_view_object_unchanged(self):
+        # live_view's own default degrades opp_elixir to None (e1_view.py's _degrade_switchable) -- built
+        # by hand here, no engine, matching that contract explicitly rather than assuming _minimal_bs's
+        # own (non-degraded) default.
+        view = replace(_minimal_bs(), opp_elixir=None)
+        bs = _minimal_bs()
+        out = policy_view_for(view, bs, "off", "live", {})
+        self.assertIs(out, view)
+        self.assertIsNone(out.opp_elixir)
+
+    def test_off_ignores_feed_noise_and_empty_estimators(self):
+        # 'off' must not even look at feed_noise or estimators -- a bogus feed_noise/empty estimators dict
+        # (which would raise for 'estimated') must not raise here.
+        view = replace(_minimal_bs(), opp_elixir=None)
+        out = policy_view_for(view, view, "off", "corrL", {})
+        self.assertIs(out, view)
+
+    def test_cli_defaults_are_off_and_live(self):
+        """Confirms the ticket's required defaults directly off the argparse parser (not by re-typing
+        'off'/'live' a second time) -- a --feed-opp-elixir/--feed-noise default drift would fail this."""
+        ap = build_parser()
+        a = ap.parse_args(['--port', '1', '--ckpt', 'x.pt', '--out', 'unused_out_dir'])
+        self.assertEqual(a.feed_opp_elixir, "off")
+        self.assertEqual(a.feed_noise, "live")
+        self.assertEqual(set(FEED_OPP_ELIXIR_MODES), {"off", "true", "estimated"})
+        self.assertEqual(set(FEED_NOISE_MODES), {"live", "corrL"})
+
+
+class TestPolicyViewForTrue(unittest.TestCase):
+    """Acceptance (b), 'true' half: the policy-visible BoardState carries bs.opp_elixir (engine ground
+    truth for THIS tick) -- equivalent to e1_eval's --noise-off opp_elixir (e1_view.py's
+    _degrade_switchable: ``bs.opp_elixir if not noise.opp_elixir else None``)."""
+
+    def test_true_copies_engine_truth_and_leaves_other_fields(self):
+        bs = _minimal_bs(my_elixir=7.0, t_sec=12.0)
+        bs = replace(bs, opp_elixir=6.25)                 # the engine's true opp_elixir for this tick
+        view = replace(_minimal_bs(my_elixir=7.0, t_sec=12.0), opp_elixir=None)  # degraded: unknown
+        out = policy_view_for(view, bs, "true", "live", {})
+        self.assertEqual(out.opp_elixir, 6.25)
+        # every OTHER field is view's own, untouched -- proven field-by-field via dataclass equality after
+        # neutralising the one field this mode is allowed to change.
+        self.assertEqual(replace(out, opp_elixir=None), replace(view, opp_elixir=None))
+
+    def test_true_ignores_feed_noise(self):
+        bs = replace(_minimal_bs(), opp_elixir=3.5)
+        view = replace(_minimal_bs(), opp_elixir=None)
+        out_live = policy_view_for(view, bs, "true", "live", {})
+        out_corrl = policy_view_for(view, bs, "true", "corrL", {})
+        self.assertEqual(out_live.opp_elixir, 3.5)
+        self.assertEqual(out_corrl.opp_elixir, 3.5)
+
+
+class TestPolicyViewForEstimated(unittest.TestCase):
+    """Acceptance (b), 'estimated' half: the policy-visible opp_elixir equals the live-reachable V2.1
+    estimator's ._est -- condition B_tt_wl under --feed-noise live, B_corrL_tt_wl under corrL
+    (feed_condition_key)."""
+
+    def test_feed_condition_key(self):
+        self.assertEqual(feed_condition_key("live"), "B_tt_wl")
+        self.assertEqual(feed_condition_key("corrL"), "B_corrL_tt_wl")
+        with self.assertRaises(SystemExit):
+            feed_condition_key("bogus")
+
+    def test_estimated_live_reads_b_tt_wl_v2_est(self):
+        view = replace(_minimal_bs(), opp_elixir=None)
+        bs = replace(_minimal_bs(), opp_elixir=9.9)       # must be IGNORED in 'estimated' mode
+        estimators = {("B_tt_wl", "v2"): _FakeEst(3.25), ("B_corrL_tt_wl", "v2"): _FakeEst(8.0)}
+        out = policy_view_for(view, bs, "estimated", "live", estimators)
+        self.assertEqual(out.opp_elixir, 3.25)
+        self.assertEqual(replace(out, opp_elixir=None), replace(view, opp_elixir=None))
+
+    def test_estimated_corrl_reads_b_corrl_tt_wl_v2_est(self):
+        view = replace(_minimal_bs(), opp_elixir=None)
+        bs = _minimal_bs()
+        estimators = {("B_tt_wl", "v2"): _FakeEst(3.25), ("B_corrL_tt_wl", "v2"): _FakeEst(8.0)}
+        out = policy_view_for(view, bs, "estimated", "corrL", estimators)
+        self.assertEqual(out.opp_elixir, 8.0)
+
+    def test_estimated_missing_condition_raises(self):
+        view = _minimal_bs()
+        with self.assertRaises(SystemExit):
+            policy_view_for(view, view, "estimated", "live", {})   # B_tt_wl/v2 not active
+
+    def test_bad_mode_raises(self):
+        view = _minimal_bs()
+        with self.assertRaises(SystemExit):
+            policy_view_for(view, view, "bogus", "live", {})
+
+
+class TestFeedNoiseObservationIdentity(unittest.TestCase):
+    """Acceptance (d): --feed-noise changes ONLY which estimator 'estimated' reads ._est from -- the
+    policy-visible BoardState is the SAME standard live_view either way, field-for-field, except
+    opp_elixir itself (the one number the whole ticket is about). Uses two estimators with DIFFERENT
+    ._est values so the test cannot pass by accident (a no-op override would make opp_elixir equal too,
+    not just the other fields)."""
+
+    def test_live_and_corrl_share_every_field_but_opp_elixir(self):
+        u = Unit(cls=5, side=1, x=0.4, y=0.6, hp_frac=1.0, deploying=None, age_sec=None, conf=1.0)
+        view = replace(_minimal_bs(units=(u,), my_elixir=6.0, t_sec=33.0), opp_elixir=None)
+        bs = view
+        estimators = {("B_tt_wl", "v2"): _FakeEst(2.0), ("B_corrL_tt_wl", "v2"): _FakeEst(6.5)}
+        out_live = policy_view_for(view, bs, "estimated", "live", estimators)
+        out_corrl = policy_view_for(view, bs, "estimated", "corrL", estimators)
+        # the ONE field allowed to differ actually does differ (proves this isn't a vacuous pass):
+        self.assertNotEqual(out_live.opp_elixir, out_corrl.opp_elixir)
+        self.assertEqual(out_live.opp_elixir, 2.0)
+        self.assertEqual(out_corrl.opp_elixir, 6.5)
+        # every other field, field-by-field via full dataclass equality once opp_elixir is neutralised:
+        self.assertEqual(replace(out_live, opp_elixir=None), replace(out_corrl, opp_elixir=None))
+        self.assertEqual(replace(out_live, opp_elixir=None), replace(view, opp_elixir=None))
+
+
+class TestValidateFeedConfig(unittest.TestCase):
+    """The --feed-opp-elixir/--feed-noise/--tracker/--corr/--estimator legality checks run_match_audit
+    (and main(), before touching the engine) both call up front."""
+
+    def test_bad_feed_opp_elixir_raises(self):
+        with self.assertRaises(SystemExit):
+            validate_feed_config("bogus", "live", True, True, "v2")
+
+    def test_bad_feed_noise_raises(self):
+        with self.assertRaises(SystemExit):
+            validate_feed_config("off", "bogus", False, False, "v1")
+
+    def test_off_and_true_need_nothing_extra(self):
+        validate_feed_config("off", "live", False, False, "v1")             # must not raise
+        validate_feed_config("true", "corrL", False, False, "v1")           # feed_noise irrelevant, ignored
+
+    def test_estimated_requires_v2_variant(self):
+        with self.assertRaises(SystemExit):
+            validate_feed_config("estimated", "live", True, False, "v1")
+        validate_feed_config("estimated", "live", True, False, "v2")        # must not raise
+        validate_feed_config("estimated", "live", True, False, "both")      # must not raise
+
+    def test_estimated_requires_tracker(self):
+        with self.assertRaises(SystemExit):
+            validate_feed_config("estimated", "live", False, False, "v2")
+
+    def test_estimated_corrl_requires_corr(self):
+        with self.assertRaises(SystemExit):
+            validate_feed_config("estimated", "corrL", True, False, "v2")
+        validate_feed_config("estimated", "corrL", True, True, "v2")        # must not raise
+
+    def test_estimated_live_does_not_require_corr(self):
+        validate_feed_config("estimated", "live", True, False, "v2")        # must not raise
+
+
+class TestFeedOppElixirCausality(unittest.TestCase):
+    """Acceptance (c): the value 'estimated' mode injects at decision tick T must reflect the estimator's
+    samples up to and including T and NOTHING later. This drives the SAME two operations, in the SAME
+    relative order, that run_match_audit's per-tick loop uses for every base condition (opp_est_audit.py:
+    the per-base ``est.update(my_e, dets, bs.t_sec)`` loop, then -- only inside ``if pol_tick:``, AFTER
+    that loop has already run for this exact sample -- ``policy_view_for(...)`` reading ``est._est``): a
+    real (not mocked) TrackedEstimatorV2 is update()'d at tick T, its policy-visible value captured via
+    policy_view_for immediately after (mirroring the loop's ordering), then update()'d AGAIN with a later
+    sample engineered to move the estimate -- and the EARLIER captured value must be unaffected."""
+
+    def test_later_sample_does_not_change_the_earlier_injected_value(self):
+        db = _db()
+        musketeer_cost = db.elixir("musketeer")
+        giant_cost = db.elixir("giant")
+        self.assertIsNotNone(musketeer_cost)
+        self.assertIsNotNone(giant_cost)
+        est = TrackedEstimatorV2(db)
+        estimators = {("B_tt_wl", "v2"): est}
+        view = replace(_minimal_bs(), opp_elixir=None)
+        bs = view
+
+        # tick T=0: reset, then this SAMPLE's update() (mirrors run_match_audit's per-base update loop,
+        # which always runs before a policy tick's injection can read ._est).
+        est.reset(my_elixir=10.0, now=0.0)
+        det_t = _Det(base="musketeer", cx=0.5, gy=0.3, team="enemy")
+        est.update(10.0, [det_t], 0.0)
+        # policy tick at T: inject NOW, exactly where run_match_audit calls policy_view_for -- after this
+        # sample's update(), before any later sample exists.
+        injected_at_t = policy_view_for(view, bs, "estimated", "live", estimators).opp_elixir
+        self.assertAlmostEqual(injected_at_t, 10.0 - musketeer_cost, places=4)
+
+        # tick T+1 (a LATER sample -- e.g. the next 5-tick estimator step): a NEW enemy card at a
+        # different position, engineered to move the estimate (a different base, far enough away that it
+        # cannot be mistaken for the same track as det_t).
+        det_t1 = _Det(base="giant", cx=0.1, gy=0.9, team="enemy")
+        est.update(10.7, [det_t1], 1.0)
+        after_later_update = est._est
+
+        # the estimate DID move (the test would be vacuous otherwise -- confirms det_t1 was engineered to
+        # actually change something):
+        self.assertNotAlmostEqual(after_later_update, injected_at_t, places=4)
+        # but the value captured AT tick T is untouched by it -- causality:
+        self.assertAlmostEqual(injected_at_t, 10.0 - musketeer_cost, places=4)
+
+    def test_est_is_read_at_call_time_not_snapshotted_earlier(self):
+        """Complementary check: policy_view_for itself does no caching/memoisation -- calling it again
+        AFTER a further update() picks up the NEW ._est, so the causality guarantee above is a property of
+        WHEN run_match_audit calls it (after this sample's updates, before the next sample's), not of this
+        function silently freezing a stale value forever."""
+        db = _db()
+        est = TrackedEstimatorV2(db)
+        estimators = {("B_tt_wl", "v2"): est}
+        view = replace(_minimal_bs(), opp_elixir=None)
+        est.reset(my_elixir=10.0, now=0.0)
+        first = policy_view_for(view, view, "estimated", "live", estimators).opp_elixir
+        est.update(10.0, [_Det(base="musketeer", cx=0.5, gy=0.3, team="enemy")], 1.0)
+        second = policy_view_for(view, view, "estimated", "live", estimators).opp_elixir
+        self.assertNotAlmostEqual(first, second, places=4)
 
 
 if __name__ == "__main__":

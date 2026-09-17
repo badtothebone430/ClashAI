@@ -262,6 +262,7 @@ import statistics
 import sys
 import time
 import zlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1045,13 +1046,104 @@ def _jsonable(obj):
 
 
 # ------------------------------------------------------------------------------------------------------
+# TICKET O18: feed the opponent-elixir OBSERVATION -- true engine value or the live-reachable estimate --
+# into the BoardState the policy actually consumes (``to_tokens``), so a full match can be re-driven with
+# the student SEEING opp_elixir instead of the always-None degraded default, and its effect on winrate
+# measured. Pure helpers (unit-testable with no engine): ``feed_condition_key`` picks which already-running
+# tracker-input estimator backs 'estimated' mode per ``--feed-noise``; ``policy_view_for`` builds the
+# EXACT BoardState ``run_match_audit`` hands to ``to_tokens`` -- ``view`` (the standard, always-computed
+# live_view) with ONLY its ``opp_elixir`` field replaced, never any other field. 'off' (the default) returns
+# ``view`` completely unchanged -- byte-identical to every pre-O18 invocation.
+# ------------------------------------------------------------------------------------------------------
+FEED_OPP_ELIXIR_MODES = ("off", "true", "estimated")
+FEED_NOISE_MODES = ("live", "corrL")
+
+
+def validate_feed_config(feed_opp_elixir: str, feed_noise: str, tracker: bool, corr: bool,
+                         estimator: str) -> None:
+    """O18: the --feed-opp-elixir/--feed-noise/--tracker/--corr/--estimator combination is legal --
+    factored out of ``run_match_audit`` (which still calls this, so a library caller can never skip it) so
+    ``main()`` can ALSO call it right after argparse, before connecting to the engine or loading the
+    checkpoint -- a misconfigured run fails in milliseconds instead of after the first match."""
+    if feed_opp_elixir not in FEED_OPP_ELIXIR_MODES:
+        raise SystemExit(f"--feed-opp-elixir must be one of {FEED_OPP_ELIXIR_MODES}, got {feed_opp_elixir!r}")
+    if feed_noise not in FEED_NOISE_MODES:
+        raise SystemExit(f"--feed-noise must be one of {FEED_NOISE_MODES}, got {feed_noise!r}")
+    if feed_opp_elixir != "estimated":
+        return
+    variants = ("v1", "v2") if estimator == "both" else (estimator,)
+    if "v2" not in variants:
+        raise SystemExit("--feed-opp-elixir estimated requires --estimator v2 (or both) -- V2.1 rules")
+    if not tracker:
+        raise SystemExit("--feed-opp-elixir estimated requires --tracker (condition B_tt_wl)")
+    if feed_noise == "corrL" and not corr:
+        raise SystemExit("--feed-opp-elixir estimated --feed-noise corrL requires --corr (B_corrL_tt_wl)")
+
+
+def feed_condition_key(feed_noise: str) -> str:
+    """--feed-noise -> the (tracker-input, live-whitelist) condition key already computed every sample
+    (module docstring O16(a)/(b)) whose V2 estimator backs 'estimated' mode: 'live' reads the SAME degraded
+    view / det stream the policy itself sees (``B_tt_wl``, MAE 2.68 in the measured range); 'corrL' reads
+    the long-persistence correlated stream (``B_corrL_tt_wl``, MAE 3.46) -- a sensitivity arm. Either way
+    only the ESTIMATOR's input stream differs; see ``policy_view_for``'s docstring for why the policy's own
+    observation never changes with this flag."""
+    if feed_noise == "live":
+        return "B_tt_wl"
+    if feed_noise == "corrL":
+        return "B_corrL_tt_wl"
+    raise SystemExit(f"--feed-noise must be one of {FEED_NOISE_MODES}, got {feed_noise!r}")
+
+
+def policy_view_for(view, bs, feed_opp_elixir: str, feed_noise: str, estimators: dict):
+    """O18: the BoardState ``run_match_audit`` actually hands to ``to_tokens`` for the policy's decision --
+    ``view`` (the SAME standard live_view every mode computes identically; module docstring) with ONLY its
+    ``opp_elixir`` field overridden, never any other field:
+
+      'off'       (default) -- ``view`` returned UNCHANGED (``opp_elixir`` stays whatever live_view set,
+                  i.e. None under the default Noise() -- obs_contract's ``opp_known`` flag is 0, exactly as
+                  every pre-O18 invocation). Byte-identical to before this ticket.
+      'true'      -- ``bs.opp_elixir`` (engine ground truth for THIS tick), equivalent to e1_eval's
+                  ``--noise-off opp_elixir`` (e1_view.py's ``_degrade_switchable`` line 168: the same
+                  ``bs.opp_elixir if not noise.opp_elixir else None`` value).
+      'estimated' -- ``estimators[(feed_condition_key(feed_noise), "v2")]._est`` -- the V2.1 estimator
+                  already running for the live-reachable tracker-input condition (module docstring O16),
+                  read AFTER its update() call for this exact sample (caller contract below).
+
+    CAUSALITY (by construction, not by anything this function checks): ``run_match_audit`` calls this only
+    from inside the per-tick loop, AFTER the loop's per-base ``estimators[...].update(...)`` calls for this
+    same sample and BEFORE ``to_tokens`` -- so an 'estimated' read reflects every sample up to and including
+    the current tick and NOTHING later. This function itself does no time-travel: it only ever reads
+    ``estimators``' CURRENT ``._est``, whatever that happens to be when called.
+
+    OBSERVATION IDENTITY ACROSS --feed-noise (ticket requirement): for a fixed ``feed_opp_elixir`` and seed,
+    'live' and 'corrL' pass the IDENTICAL ``view`` in (feed_noise only selects which condition's estimator
+    ``estimated`` reads ``._est`` from -- it never touches ``view`` itself, which every mode computes from
+    the same ``live_view(bs, rng_obs, deck, Noise())`` call regardless of these flags). ``replace(view,
+    opp_elixir=...)`` therefore changes at most one field: every other field of the returned BoardState is
+    ``view``'s own object, unchanged -- proven field-by-field in TestFeedNoiseObservationIdentity."""
+    if feed_opp_elixir == "off":
+        return view
+    if feed_opp_elixir == "true":
+        return replace(view, opp_elixir=float(bs.opp_elixir))
+    if feed_opp_elixir == "estimated":
+        key = feed_condition_key(feed_noise)
+        est = estimators.get((key, "v2"))
+        if est is None:
+            raise SystemExit(f"--feed-opp-elixir estimated requires condition {key!r} (v2) to be active -- "
+                             f"pass --estimator v2 (or both), --tracker, and (for --feed-noise corrL) --corr")
+        return replace(view, opp_elixir=float(est._est))
+    raise SystemExit(f"--feed-opp-elixir must be one of {FEED_OPP_ELIXIR_MODES}, got {feed_opp_elixir!r}")
+
+
+# ------------------------------------------------------------------------------------------------------
 # one match, four conditions, per-tick rows at STEP_TICKS cadence -- one or two estimator variants each
 # ------------------------------------------------------------------------------------------------------
 def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict,
                     warned_costless: Optional[set] = None, whitelist: Optional[frozenset] = None,
                     charge_trace: bool = False, estimator: str = "v1",
                     v2_kwargs: Optional[dict] = None, tracker: bool = False,
-                    corr: bool = False) -> tuple[list[dict], dict, list[dict], list[dict]]:
+                    corr: bool = False, feed_opp_elixir: str = "off",
+                    feed_noise: str = "live") -> tuple[list[dict], dict, list[dict], list[dict]]:
     """Mirrors e1_eval.run_match's while-loop (same live policy, same accepted-play bookkeeping, IDENTICAL
     decisions at IDENTICAL ticks) but steps the engine STEP_TICKS at a time, updates every active
     estimator every step from the SAME det stream per condition, and records a per-tick truth/estimate row
@@ -1065,7 +1157,14 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     False, in which case every condition below iterates ``active_base_conds(False, False) == BASE_CONDS``
     and this function's behaviour is BYTE-IDENTICAL to before O16. ``tracker`` adds ``B_tt`` (module
     docstring O16(a)); ``corr`` adds ``B_corrS``/``B_corrL`` (O16(b)); both together additionally add
-    ``B_corrS_tt``/``B_corrL_tt``."""
+    ``B_corrS_tt``/``B_corrL_tt``.
+
+    O18: ``feed_opp_elixir`` ('off' default/'true'/'estimated') and ``feed_noise`` ('live' default/'corrL')
+    -- see ``policy_view_for``'s docstring for the exact BoardState this builds and the causality contract.
+    'off' leaves every line above and the policy's decision byte-identical to before O18. 'estimated'
+    requires condition ``B_tt_wl`` (v2) active (``--tracker``, ``--estimator v2``/``both``); with
+    ``feed_noise='corrL'`` it additionally requires ``B_corrL_tt_wl`` active (``--corr`` too) -- both
+    checked up front, before the match loop runs."""
     if warned_costless is None:
         warned_costless = set()
     if whitelist is None:
@@ -1076,6 +1175,9 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         raise SystemExit(f"--decide-every {decide_every} must be a multiple of --estimator-step {step}")
     if estimator not in ("v1", "v2", "both"):
         raise SystemExit(f"--estimator must be v1/v2/both, got {estimator!r}")
+    # O18: 'estimated' reads condition B_tt_wl / B_corrL_tt_wl's V2 estimator -- validated up front (never
+    # mid-match) so a misconfigured run fails fast instead of KeyError-ing on the first policy tick.
+    validate_feed_config(feed_opp_elixir, feed_noise, tracker, corr, estimator)
     variants = ("v1", "v2") if estimator == "both" else (estimator,)
     both_mode = len(variants) > 1
     bases = active_base_conds(tracker, corr)      # O16(c): BASE_CONDS unchanged when both flags are off
@@ -1262,7 +1364,12 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         # --- our own decision (same live rule as e1_eval.run_match), POLICY ticks only, unchanged cadence ---
         is_my_play_tick = False
         if pol_tick:
-            tok, mask, sc = to_tokens(view, MAX_U)
+            # O18: the estimator update() loop above (this exact sample) has already run for every base,
+            # so an 'estimated' read here is causal -- through this tick and nothing later. 'off' returns
+            # ``view`` unchanged (byte-identical to before O18); every other field of the BoardState
+            # ``to_tokens`` reads is ``view``'s own, regardless of feed_opp_elixir/feed_noise.
+            policy_view = policy_view_for(view, bs, feed_opp_elixir, feed_noise, estimators)
+            tok, mask, sc = to_tokens(policy_view, MAX_U)
             past = _past(done_plays, tick)
             enc, heads, p, hand = model_forward(model, tok, mask, sc, past, device)
             n_dec += 1
@@ -1372,6 +1479,19 @@ def build_parser() -> argparse.ArgumentParser:
                     "per-sample marginals as condition B's live_view, but temporally CORRELATED noise "
                     "(pipeline/opp_est_degrade_corr.py; SHORT/LONG persistence settings, both always run). "
                     "OFF by default -- no effect on existing runs.")
+    ap.add_argument("--feed-opp-elixir", choices=FEED_OPP_ELIXIR_MODES, default="off", help="O18: what the "
+                    "POLICY sees as opp_elixir. 'off' (default): unchanged, the degraded view's None -- "
+                    "byte-identical to before O18. 'true': bs.opp_elixir (engine ground truth), equivalent "
+                    "to e1_eval --noise-off opp_elixir. 'estimated': the live-reachable V2.1 estimate "
+                    "(condition B_tt_wl/B_corrL_tt_wl's ._est, per --feed-noise), requires --tracker "
+                    "(and --estimator v2/both; --corr too for --feed-noise corrL).")
+    ap.add_argument("--feed-noise", choices=FEED_NOISE_MODES, default="live", help="O18: with "
+                    "--feed-opp-elixir estimated, which det stream feeds the ESTIMATOR -- 'live' (default, "
+                    "condition B_tt_wl, MAE 2.68) or 'corrL' (condition B_corrL_tt_wl, long-persistence "
+                    "correlated degrade, MAE 3.46; requires --corr). The policy's own OBSERVATION (the "
+                    "board it sees) is the SAME standard live_view either way -- only the estimator's "
+                    "input, and so the injected elixir number, differs. Ignored for --feed-opp-elixir "
+                    "off/true.")
     ap.add_argument("--out", type=Path, required=True)
     return ap
 
@@ -1384,6 +1504,7 @@ def main(argv=None) -> int:
     stall_elixir = None if str(a.stall_elixir).lower() == "none" else float(a.stall_elixir)
     if int(a.decide_every) % int(a.estimator_step) != 0:
         raise SystemExit(f"--decide-every {a.decide_every} must be a multiple of --estimator-step {a.estimator_step}")
+    validate_feed_config(a.feed_opp_elixir, a.feed_noise, bool(a.tracker), bool(a.corr), a.estimator)
     import torch
     torch.set_num_threads(max(1, int(a.threads)))
 
@@ -1437,7 +1558,8 @@ def main(argv=None) -> int:
                     match_rows, msummary, ch_rows, tr_rows = run_match_audit(
                         env, model, deck, db, entry, k, cfg, warned_costless, whitelist,
                         charge_trace=charge_trace, estimator=a.estimator,
-                        tracker=bool(a.tracker), corr=bool(a.corr))
+                        tracker=bool(a.tracker), corr=bool(a.corr),
+                        feed_opp_elixir=a.feed_opp_elixir, feed_noise=a.feed_noise)
                 except Exception as exc:
                     print(f"[opp_est_audit] ERROR on {entry['tag']} k={k}: {exc!r}", flush=True)
                     return 3
@@ -1490,12 +1612,32 @@ def main(argv=None) -> int:
                "crowns_against": m["crowns_against"], "plays_accepted": m["plays_accepted"],
                "decisions": m["decisions"], "end_tick": m["end_tick"], "n_ticks": m["n_ticks"]}
               for m in match_summaries]
+    # O18: run-level winrate -- wins/n plus, when importable, the SAME entry-clustered bootstrap CI shape
+    # pipeline/e1_score.summarise/cluster_bootstrap uses (never re-implemented here, so it can never drift
+    # from the lead's own scoring). Falls back to wins/n + a note if e1_score can't be imported for any
+    # reason (e.g. run standalone outside the repo) -- never fails the run over a reporting extra.
+    n_matches_wr = len(matches)
+    wins_wr = sum(1 for m in matches if m["outcome"] == "win")
+    winrate_summary: dict[str, Any] = {
+        "n": n_matches_wr, "wins": wins_wr,
+        "winrate": (wins_wr / n_matches_wr) if n_matches_wr else None,
+    }
+    try:
+        from pipeline.e1_score import cluster_bootstrap as _cluster_bootstrap
+        by_entry_wr: dict[str, list] = {}
+        for m in matches:
+            by_entry_wr.setdefault(m["tag"], []).append(1.0 if m["outcome"] == "win" else 0.0)
+        winrate_summary["winrate_entry_weighted"] = _cluster_bootstrap(by_entry_wr)
+    except Exception as exc:
+        winrate_summary["note"] = f"pipeline.e1_score bootstrap unavailable ({exc!r}) -- wins/n only"
     summary = {
         "n_ticks": len(all_rows), "n_matches": len(match_summaries), "port": a.port, "split": a.split,
         "entries": a.entries, "seeds": a.seeds, "ckpt": str(a.ckpt),
         "decide_every": cfg["decide_every"], "estimator_step": cfg["estimator_step"],
         "n_detector_cards": len(whitelist),
         "matches": matches,
+        "winrate": winrate_summary,                       # O18: run-level wins/n (+ bootstrap CI if available)
+        "feed_opp_elixir": a.feed_opp_elixir, "feed_noise": a.feed_noise,   # O18: which arm this run is
         "plays_accepted_by_match": {f"{m['tag']}:{m['k']}": m["plays_accepted"] for m in match_summaries},
         "over_charge_at_end_by_match": [{"tag": m["tag"], "k": m["k"], **m["over_charge_at_end"]}
                                         for m in match_summaries],
@@ -1582,6 +1724,8 @@ def main(argv=None) -> int:
         "n_ticks": summary["n_ticks"], "n_matches": summary["n_matches"],
         "matches": summary["matches"],                            # FIX 3: fidelity gate vs ctrl_live100
         "plays_accepted_by_match": summary["plays_accepted_by_match"],
+        "feed_opp_elixir": a.feed_opp_elixir, "feed_noise": a.feed_noise,           # O18
+        "winrate": winrate_summary["winrate"], "wins": winrate_summary["wins"], "n": winrate_summary["n"],
     }
     for long_name, base in COND_DEFS:
         for variant in variants:
