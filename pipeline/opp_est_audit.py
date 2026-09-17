@@ -160,10 +160,102 @@ for its own bookkeeping. ``classify_charge_reason`` turns those into a best-effo
 module's inline comment on that function for the one place its evaluation order deliberately departs from the
 ticket text's literal listing order (and why -- the "rebill_after_expiry" acceptance scenario forces it).
 Full writeup: scratchpad/gauntlet/L67/opp_fix/O10_trace.md.
+
+TICKET O16 -- two new measurement conditions, both OFF by default (``--tracker``, ``--corr``; existing
+runs byte-identical). Full writeup: scratchpad/gauntlet/L67/opp_fix/O16_tracker.md.
+
+(a) TRACKER-INPUT (``--tracker``): condition B's raw dets feed billing directly (module docstring
+above, "the estimator is fed raw dets instead" -- play.py:558). Live never does this: play.py:518
+runs ``TeamTracker.tag()`` first and only THEN filters to ``d.team == "enemy"`` (play.py:547) before
+``_opp_elx.update()`` ever sees a det. ``B_tt`` closes that gap: a ``TeamTracker`` (constructed with
+live's own defaults -- ``make_team_tracker()`` below, cited against play.py:420-441 /
+live_reader_audit.py:185-199) is fed the SAME per-sample det stream condition B already draws (no new
+noise), and the V2 estimator is billed ONE synthetic det per track's FIRST sample at ``hits >=
+min_hits`` ("first confirmed sighting"), at that track's position/base, team forced "enemy" (only
+enemy-verdict tracks are ever billed) -- never the same track twice (``id(track)`` is a stable
+per-track identity for its life, the SAME technique O10's ``TracedEstimator`` already uses for
+track-expiry diffing; see ``tt_bill_dets``). ``B_corrS_tt``/``B_corrL_tt`` are the same billing scheme
+over the correlated det streams (b) below, one independent ``TeamTracker`` per stream. KNOWN GAP: this
+harness never renders pixels, so the HP-bar (rank 3) and body-art (rank 5) evidence ranks in
+``TeamTracker._verdict`` cannot be simulated; the noisy per-sample team already baked into a detection
+by ``degrade()``/``corr_live_view`` (UNKNOWN_TEAM_RATE / WRONG_TEAM_RATE) is wired into ``body_vote``
+instead (the closest live analog: a noisy single-frame colour read) so the ladder's last-resort rank
+still gets SOME evidence rather than none; ``bar_vote`` stays ``None`` throughout (rank 3 never fires).
+Every det (mine + enemy + unknown side) is fed to the tracker, exactly as live's ``dets_all`` is,
+so the deck veto / own-play anchor / motion prior see the same population a real run would.
+
+(b) CORRELATED DEGRADE (``--corr``): ``pipeline/opp_est_degrade_corr.corr_live_view`` -- a NEW,
+harness-local module (obs_contract.py / e1_view.py untouched, imported read-only). Full design
+rationale, the closed-form Markov/AR(1) derivations, and the UNMEASURED-persistence-length caveat are
+in that module's own docstring (read it before touching any constant here) and repeated in the
+progress file. Two settings, both always run when ``--corr`` is set: ``CORR_SHORT`` (L_miss=1.5,
+L_fp=1.5, rho=0.3) and ``CORR_LONG`` (L_miss=4, L_fp=8, rho=0.8) -- conditions ``B_corrS``/``B_corrL``
+(raw-det estimator) and, additionally under ``--tracker``, ``B_corrS_tt``/``B_corrL_tt``. Each corr
+setting gets its OWN per-match ``new_state()`` track dict and its OWN harness-local RNG stream
+(``corrS_seed``/``corrL_seed``, same crc32-domain discipline as ``b5_seed``) -- never e1_eval's own
+streams, never shared between settings, never re-used across matches.
+
+(c) CONDITION-SET GENERALIZATION: ``BASE_CONDS`` (the 4-tuple ``Aplus/A/A_wl/B``) is UNCHANGED --
+existing imports/tests that pin its exact shape keep working. ``active_base_conds(tracker, corr)``
+returns the FULL set actually run this invocation (``BASE_CONDS`` plus whichever of
+``B_tt``/``B_corrS``/``B_corrL``/``B_corrS_tt``/``B_corrL_tt`` are enabled), and every per-tick/
+per-match data structure that used to iterate ``BASE_CONDS`` directly (the estimator dict, the dets/
+my_elixir/n_enemy_dets maps, the row-building loops) now iterates ``active_base_conds(...)`` instead --
+with both flags off this is BYTE-IDENTICAL to ``BASE_CONDS``, so ticks.jsonl/summary.json/summary.md
+are unchanged for every existing invocation. ``_HIST_FIELD``/``tick_field`` gained entries for the five
+new conditions (their OWN name, no historical spelling to preserve) so ticks.jsonl's new columns are
+``est_B_tt``, ``n_enemy_dets_B_tt``, etc. -- for a ``_tt`` condition, ``n_enemy_dets_*`` counts dets
+BILLED this sample (tracks newly confirmed), not raw enemy detections visible, since that is what is
+actually fed to ``update()``; documented here and in the progress file, not just left to be inferred.
+
+TICKET O16 ATTEMPT 2 -- blind verifier fixes (progress file "## Attempt 2" has the full writeup; the
+corr module's marginals PASSED cleanly and were NOT touched).
+
+FIX 1 (HIGH) -- ``billed_ids`` no longer keys on ``id(track dict)``. A track dict is freed the instant
+``TeamTracker.tag()`` drops it from ``self._tracks``, and CPython's small-object allocator can (and, per
+the verifier's 200-sequential-track probe, DOES) hand that exact address to the next same-shaped dict it
+allocates -- a later, genuinely different track landing on a recycled address used to look
+"already billed" under the old key and was silently never charged. Fixed by stamping a per-tracker
+MONOTONIC uid into each track dict on first sight (``tr["_bill_uid"]``, from a counter
+``make_team_tracker`` attaches to the instance as ``tracker._o16_uid_counter`` -- a dynamic attribute,
+not a change to ``TeamTracker``/replay_mine.py itself) and keying ``billed_ids`` on THAT. Immune to
+address recycling by construction: a freshly allocated dict starts with none of its own keys regardless
+of which address it occupies. See ``tt_bill_dets``'s docstring for the full before/after reasoning.
+
+FIX 2 (MEDIUM) -- ``B_tt`` (and its corr-setting siblings) is an IDEALISED DESIGN UNDER TEST, not a
+measurement of what live's estimator path actually does today: live bills every enemy-tagged,
+whitelisted det EVERY FRAME with no confirmation gate at all (play.py:547,558 -- ``min_hits`` lives only
+in ``enemy_tracks()``, which feeds threat/aim logic, never ``_opp_elx.update()``). Every "_tt" label
+(module docstring, ``BASE_LABELS`` in ``main()``) now says so explicitly. (b) Added the LIVE-REACHABLE
+sibling of every "_tt" condition -- ``B_tt_wl``, ``B_corrS_tt_wl``, ``B_corrL_tt_wl``: the SAME
+confirmed-track billing, additionally requiring the billed det's base to clear live's
+``detector_cards`` whitelist (``filter_whitelisted_billed_dets``, applied to the tracker's OUTPUT, the
+same place play.py:547's own filter sits relative to play.py:518's ``tag()`` call -- so a condition and
+its "_wl" sibling share ONE ``tag()``/billing call per sample; tracking never forks between them, only
+what is ultimately billed to each one's own estimator does). ``active_base_conds``/``build_cond_defs``
+updated so ``--tracker --corr`` now yields (in order): ``Aplus, A, A_wl, B, B_tt, B_tt_wl, B_corrS,
+B_corrS_tt, B_corrS_tt_wl, B_corrL, B_corrL_tt, B_corrL_tt_wl``.
+
+FIX 3 (LOW) -- ``tt_dets_of`` now passes the RAW (unstripped) detector class name as ``Detection.cls``
+when the pipeline det carries one (``_Det.raw_cls``, new optional field ``dets_of`` now fills in,
+defaulting to None so every existing ``_Det(base, cx, gy, team)`` positional call is unaffected), falling
+back to the already-stripped ``.base`` otherwise. Before this fix ``cls`` was always the stripped base
+(e.g. "poison" instead of "poison_aoe"), so ``TeamTracker``'s zone-class rule (``d.cls in
+ZONE_CLASSES``, where ``ZONE_CLASSES`` IS ``vocab.AOE_CLASSES`` -- raw "_aoe"-suffixed names) could never
+fire. No effect on any measurement produced so far (every det stream billed through a tracker today is
+units-only, per ``dets_of(bs.units)``/``dets_of(view.units)``/``dets_of(cview.units)`` -- no spells/zones
+in the mix yet), kept faithful for whenever that changes.
+
+LOW (docstring accuracy, verifier-flagged) -- re-checked: this module and ``opp_est_degrade_corr.py``
+never described the false-positive process as a "random walk" anywhere (grepped both files plus the
+progress file to confirm) -- both have always called it what it is, an AR(1) process about the host
+unit's position (module docstring (b) above, and ``opp_est_degrade_corr.py``'s own docstring, design
+item 2/3). No wording change was needed; noted here rather than silently assuming the flag applied.
 """
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import math
 import statistics
@@ -199,6 +291,9 @@ from clashrl.config import Config                                               
 from clashrl.opponent_elixir import (                                              # noqa: E402
     OpponentElixirEstimator, OpponentElixirEstimatorV2, V2_PARAMS,
 )
+from clashrl.replay_mine import Detection as TTDetection, TeamTracker, own_card_bases  # noqa: E402
+
+from pipeline.opp_est_degrade_corr import CORR_LONG, CORR_SHORT, CorrParams, corr_live_view, new_state  # noqa: E402
 
 
 STEP_TICKS = 5              # CHANGE 1: estimator update cadence (engine ticks); must divide --decide-every
@@ -210,6 +305,18 @@ def b5_seed(tag: str, k: int) -> int:
     docstring CHANGE 1). Same crc32(f"{tag}:<domain>:{k}") shape as e1_eval.obs_seed/random_seed, a different
     domain string so it can never collide with either of those."""
     return zlib.crc32(f"{tag}:oppest_b5:{k}".encode())
+
+
+def corrS_seed(tag: str, k: int) -> int:
+    """O16(b): harness-local RNG domain for the SHORT correlated-degrade stream -- same crc32 discipline as
+    ``b5_seed``, a distinct domain string so it never collides with e1_eval's streams, ``b5_seed``, or the
+    LONG corr stream."""
+    return zlib.crc32(f"{tag}:oppest_corrS:{k}".encode())
+
+
+def corrL_seed(tag: str, k: int) -> int:
+    """O16(b): the LONG correlated-degrade stream's own RNG domain -- see ``corrS_seed``."""
+    return zlib.crc32(f"{tag}:oppest_corrL:{k}".encode())
 
 
 def is_policy_tick(tick: int, first_tick: int, decide_every: int) -> bool:
@@ -224,13 +331,21 @@ def is_policy_tick(tick: int, first_tick: int, decide_every: int) -> bool:
 # for its shape only, per the ticket).
 # ------------------------------------------------------------------------------------------------------
 class _Det:
-    __slots__ = ("base", "cx", "gy", "team")
+    __slots__ = ("base", "cx", "gy", "team", "raw_cls")
 
-    def __init__(self, base: str, cx: float, gy: float, team: str):
+    def __init__(self, base: str, cx: float, gy: float, team: str, raw_cls: Optional[str] = None):
         self.base = str(base)
         self.cx = float(cx)
         self.gy = float(gy)
         self.team = str(team)
+        # O16 attempt 2 FIX 3 (verifier, LOW): the UNSTRIPPED detector class name (e.g. "poison_aoe"),
+        # when known -- ``base`` is already ``vocab.base_key``-folded (e.g. "poison"), which is what every
+        # OTHER consumer of ``_Det`` wants, but ``tt_dets_of`` needs the raw name so TeamTracker's own
+        # zone-class check (``d.cls in ZONE_CLASSES``, replay_mine.py -- ``ZONE_CLASSES`` is exactly
+        # ``vocab.AOE_CLASSES``, RAW "_aoe"-suffixed names) can ever fire. Optional and defaults to None
+        # (falls back to ``base``) so every existing positional ``_Det(base, cx, gy, team)`` call --
+        # tests included -- is unaffected.
+        self.raw_cls = str(raw_cls) if raw_cls is not None else None
 
 
 _TEAM_OF_SIDE = {0: "mine", 1: "enemy", -1: "unknown"}
@@ -240,9 +355,14 @@ PHASES = ("single", "double", "overtime")
 def dets_of(items) -> list[_Det]:
     """Any ``BoardState`` unit sequence (``.units`` OR ``.spells``) -> ``_Det`` list, every side kept (the
     estimator's own ``update()`` filters to ``team == "enemy"`` at opponent_elixir.py:94, so passing all
-    three and letting it filter is equivalent to pre-filtering, and matches e1_eval's own dets shape)."""
-    return [_Det(vocab.base_key(vocab.UNIT_VOCAB[u.cls]), u.x, u.y, _TEAM_OF_SIDE.get(u.side, "unknown"))
-            for u in items]
+    three and letting it filter is equivalent to pre-filtering, and matches e1_eval's own dets shape).
+    Carries the RAW (unstripped) detector class name too (``_Det.raw_cls`` -- FIX 3 above); today only
+    ``tt_dets_of`` reads it, everyone else keeps using ``.base``."""
+    out = []
+    for u in items:
+        raw = vocab.UNIT_VOCAB[u.cls]
+        out.append(_Det(vocab.base_key(raw), u.x, u.y, _TEAM_OF_SIDE.get(u.side, "unknown"), raw_cls=raw))
+    return out
 
 
 def dets_of_costed(items, db: CardDB, warned: set) -> list[_Det]:
@@ -711,6 +831,180 @@ def summarize_condition(rows: list[dict], est_key: str) -> dict:
 # ------------------------------------------------------------------------------------------------------
 BASE_CONDS: tuple[str, ...] = ("Aplus", "A", "A_wl", "B")
 _HIST_FIELD = {"Aplus": "Aplus", "A": "A", "A_wl": "Awl", "B": "B"}   # historical (pre-O13) field spelling
+# O16: the new conditions have no pre-existing spelling to preserve -- their ticks.jsonl column is just
+# their own name (est_B_tt, n_enemy_dets_B_corrS_tt_wl, ...). tick_field() falls back to the base name
+# itself for any key not in this dict, so this update is additive only -- BASE_CONDS's four historical
+# entries above are untouched. Attempt 2 FIX 2(b) adds the three "_wl" (live-reachable) siblings.
+_HIST_FIELD.update({"B_tt": "B_tt", "B_tt_wl": "B_tt_wl", "B_corrS": "B_corrS", "B_corrL": "B_corrL",
+                    "B_corrS_tt": "B_corrS_tt", "B_corrS_tt_wl": "B_corrS_tt_wl",
+                    "B_corrL_tt": "B_corrL_tt", "B_corrL_tt_wl": "B_corrL_tt_wl"})
+
+#: O16: every condition this module knows how to run, base-condition-agnostic, in the fixed order
+#: active_base_conds() ever emits them (BASE_CONDS first, then B's tracker-input pair, then each corr
+#: setting's raw-det condition followed by its own tracker-input pair) -- long summary-key name -> short
+#: base name.
+_LONG_NAME = {
+    "Aplus": "Aplus_perfect_detection_with_spells", "A": "A_perfect_detection",
+    "A_wl": "A_wl_live_whitelist", "B": "B_degraded_live",
+    "B_tt": "B_tt_tracker_input_idealised", "B_tt_wl": "B_tt_wl_tracker_input_live_whitelist",
+    "B_corrS": "B_corrS_short_correlated",
+    "B_corrS_tt": "B_corrS_tt_short_correlated_tracker_input_idealised",
+    "B_corrS_tt_wl": "B_corrS_tt_wl_short_correlated_tracker_input_live_whitelist",
+    "B_corrL": "B_corrL_long_correlated",
+    "B_corrL_tt": "B_corrL_tt_long_correlated_tracker_input_idealised",
+    "B_corrL_tt_wl": "B_corrL_tt_wl_long_correlated_tracker_input_live_whitelist",
+}
+
+
+def active_base_conds(tracker: bool, corr: bool) -> tuple[str, ...]:
+    """O16(c): the full set of base conditions THIS invocation runs. Both flags False (the default)
+    reproduces ``BASE_CONDS`` exactly (tuple equality, not just same elements) -- every existing
+    invocation's ticks.jsonl/summary keys are therefore byte-identical to before O16. ``--tracker`` alone
+    adds ``B_tt`` + ``B_tt_wl`` (billed from condition B's own det stream via a TeamTracker, module
+    docstring (a); ``_wl`` is the live-reachable, whitelist-filtered sibling -- attempt 2 FIX 2(b));
+    ``--corr`` alone adds the two raw-det correlated conditions ``B_corrS``/``B_corrL``; both together
+    additionally add, for EACH corr setting, its own tracker-input pair (``B_corrS_tt``/``B_corrS_tt_wl``,
+    ``B_corrL_tt``/``B_corrL_tt_wl``) right after that setting's raw-det condition. With both flags on:
+    ``Aplus, A, A_wl, B, B_tt, B_tt_wl, B_corrS, B_corrS_tt, B_corrS_tt_wl, B_corrL, B_corrL_tt,
+    B_corrL_tt_wl``."""
+    conds = list(BASE_CONDS)
+    if tracker:
+        conds += ["B_tt", "B_tt_wl"]
+    if corr:
+        for name in ("B_corrS", "B_corrL"):
+            conds.append(name)
+            if tracker:
+                conds += [f"{name}_tt", f"{name}_tt_wl"]
+    return tuple(conds)
+
+
+def build_cond_defs(tracker: bool, corr: bool) -> tuple[tuple[str, str], ...]:
+    """(long_summary_key, base_condition) pairs for exactly the conditions ``active_base_conds`` returns,
+    in the same order -- replaces main()'s old hardcoded ``COND_DEFS`` 4-tuple, which is now this
+    function's ``tracker=False, corr=False`` case (byte-identical output, per O16(c))."""
+    return tuple((_LONG_NAME[b], b) for b in active_base_conds(tracker, corr))
+
+
+# ------------------------------------------------------------------------------------------------------
+# O16(a): TeamTracker-input billing. See the module docstring's O16(a) section for the full design and
+# the KNOWN GAP (no bar_vote/body_vote pixel evidence available offline).
+# ------------------------------------------------------------------------------------------------------
+def make_team_tracker(db: CardDB) -> TeamTracker:
+    """A ``TeamTracker`` built with LIVE's OWN construction defaults -- literal-for-literal the values
+    play.py:420-441 passes (``icebow/tools/live_reader_audit.py:185-199`` builds it identically offline,
+    modulo ``is_spell``, confirming these are the shared live/offline defaults, not a one-off). The only
+    parameter live derives from ``cfg.get(...)`` that is NOT simply the class's own ``__init__`` default
+    is ``enemy_window_s`` (4.0 live vs 2.5 if left to default to ``spawn_window_s``) -- every other value
+    below equals both the live cfg default AND the bare class default; they are still spelled out
+    explicitly so this construction can never silently drift from live if either default ever changes.
+
+    O16 attempt 2 FIX 1 (verifier, HIGH): also stamps a per-tracker monotonic uid COUNTER onto the
+    returned instance (``tt._o16_uid_counter``) -- a plain dynamic attribute, not a change to
+    ``TeamTracker`` itself (``replay_mine.py`` is O15's protected territory this ticket never opens for
+    writing). ``tt_bill_dets`` uses it to stamp a content-based id into each track dict on first sight;
+    see that function's docstring for why ``id(track dict)`` alone was wrong."""
+    tt = TeamTracker(
+        own_cards=own_card_bases(db),                                # DECK VETO (play.py:422)
+        is_building=lambda b, _db=db: _db.kind(b) == "building",      # building side prior (play.py:424)
+        is_spell=lambda b, _db=db: _db.kind(str(b)) == "spell",       # play.py:441 (base already base-keyed here)
+        spawn_radius=0.10, spawn_window_s=2.5, enemy_window_s=4.0, track_radius=0.12, forget_s=4.5,
+        motion_min=0.05, deep_mine_y=0.62, deep_enemy_y=0.38, min_hits=2, phantom_stale_s=6.0,
+    )
+    tt._o16_uid_counter = itertools.count(1)
+    return tt
+
+
+def tt_dets_of(pipeline_dets: list) -> list:
+    """Pipeline ``_Det``s (this sample's condition-B/corr det stream, ALL sides -- mine + enemy +
+    unknown, exactly the population ``TeamTracker.tag()`` sees live via ``dets_all``) -> real
+    ``clashrl.replay_mine.Detection`` objects ``TeamTracker.tag()`` can mutate. ``cls`` is the RAW
+    (unstripped) detector class name when the pipeline det carries one (``_Det.raw_cls`` -- O16 attempt 2
+    FIX 3, verifier LOW) so ``TeamTracker``'s own zone-class check (``d.cls in ZONE_CLASSES``) can fire
+    exactly as it would live, falling back to the already-stripped ``.base`` for any det built without
+    one (``Detection.base`` re-applies ``card_threat.base_key``, idempotent on an already-base string, so
+    the fallback is harmless, just not zone-aware -- true today only for det streams built by hand in a
+    test). ``cx``/``cy`` are the pipeline det's ``cx``/``gy`` with no separate ground offset (pipeline's
+    ``Unit.y`` is already the ground position -- ``_Det.gy`` module docstring above), so ``Detection.gy``
+    (``cy`` when ``ground_cy`` is None) equals it directly. ``body_vote`` carries the SAME degraded team
+    this det already has (module docstring KNOWN GAP: the closest live analog to a noisy single-frame
+    colour read, since no pixels exist to vote from); ``bar_vote`` stays None -- rank 3 of
+    ``TeamTracker._verdict`` never fires in this harness."""
+    out = []
+    for d in pipeline_dets:
+        bv = "mine" if d.team == "mine" else "enemy" if d.team == "enemy" else None
+        cls = d.raw_cls if d.raw_cls is not None else d.base
+        out.append(TTDetection(cls, d.cx, d.gy, 0.05, 0.05, 1.0, team="unknown", ground_cy=None,
+                               bar_vote=None, body_vote=bv))
+    return out
+
+
+def tt_bill_dets(tracker: TeamTracker, pipeline_dets: list, t: float, billed_ids: set) -> list:
+    """O16(a): IDEALISED billing design under test, NOT live's current estimator path -- live feeds
+    EVERY enemy-tagged, whitelisted det to the estimator every frame with NO confirmation gate at all
+    (play.py:547,558; the ``min_hits`` gate lives only in ``enemy_tracks()``, which feeds threat/aim
+    logic, never the elixir estimator). This function is the hypothesis "bill once per
+    TeamTracker-CONFIRMED track instead" -- see ``B_tt``'s condition label in ``main()`` for the same
+    caveat surfaced in summary.md.
+
+    Feeds ``pipeline_dets`` (condition B/corr's own det stream for this sample, unmodified -- via
+    ``tt_dets_of`` above) to ``tracker.tag()``, then returns one ``_Det`` per track that just reached
+    ``tracker.min_hits`` for the FIRST time ("first confirmed sighting") -- team 'enemy' only (a track
+    the tracker calls 'mine'/'unknown' is never billed), never a track already in ``billed_ids``.
+
+    O16 attempt 2 FIX 1 (verifier, HIGH -- the previous version of this docstring's own justification
+    was WRONG): ``billed_ids`` no longer holds ``id(track dict)``. A track dict is freed the moment
+    ``TeamTracker.tag()`` drops it from ``self._tracks`` (module docstring -- CPython's small-object
+    allocator then happily hands that exact address to the NEXT same-shaped dict it allocates), so two
+    DIFFERENT tracks over a match's lifetime can share the same ``id()`` in sequence -- a later track
+    landing on a recycled address would silently look "already billed" and never get charged. Verified
+    live by the blind verifier's own probe (200 sequential distinct tracks, each seen twice then a 5 s
+    gap between them, produced fewer than 200 bills under the old ``id()`` key).
+
+    FIXED by stamping a per-tracker MONOTONIC uid INTO the track dict itself, on first sight
+    (``tr["_bill_uid"]``, from the counter ``make_team_tracker`` attaches as ``tracker._o16_uid_counter``)
+    and keying ``billed_ids`` on THAT instead. This is immune to address recycling by construction: a
+    freshly allocated dict -- REGARDLESS of what memory it occupies -- starts with none of its own keys,
+    so ``"_bill_uid" not in tr`` is true for every genuinely new track and false for every track that
+    already has one, with no dependence on the object's address. Extra keys on a ``TeamTracker`` track
+    dict do not confuse ``TeamTracker`` itself (it only ever reads specific keys it wrote, never
+    inspects a track's full key set or length).
+
+    ``billed_ids`` (uids, not addresses) is kept one per (match, tracker) and never reset mid-match, so a
+    track is billed AT MOST ONCE for its life; a track that later EXPIRES and a brand-new track created
+    at the same spot afterward is -- correctly -- a different dict with no ``_bill_uid`` yet, so it CAN
+    be billed again (matches live: a new ``TeamTracker`` track is a new track, full stop). Mutates
+    ``tracker`` (via ``tag()``, plus the ``_bill_uid`` stamp) and ``billed_ids`` in place."""
+    tt_dets = tt_dets_of(pipeline_dets)
+    tracker.tag(tt_dets, float(t))
+    counter = getattr(tracker, "_o16_uid_counter", None)
+    if counter is None:                    # defensive: a TeamTracker built without make_team_tracker
+        counter = itertools.count(1)
+        tracker._o16_uid_counter = counter
+    out: list[_Det] = []
+    for tr in tracker._tracks:
+        if "_bill_uid" not in tr:
+            tr["_bill_uid"] = next(counter)          # stamped on EVERY track, not just billed ones, so a
+        if tr["team"] != "enemy" or int(tr.get("hits", 0)) < tracker.min_hits:  # later verdict flip to
+            continue                                                            # 'enemy' still finds its uid
+        uid = tr["_bill_uid"]
+        if uid in billed_ids:
+            continue
+        billed_ids.add(uid)
+        out.append(_Det(str(tr["base"]), float(tr["x"]), float(tr["y"]), "enemy"))
+    return out
+
+
+def filter_whitelisted_billed_dets(dets: list, whitelist: frozenset) -> list:
+    """O16 attempt 2 FIX 2(b): the live-reachable sibling of a ``_tt`` condition -- keep only billed dets
+    whose base is in live's ``detector_cards`` whitelist. Mirrors ``dets_of_whitelisted``'s own
+    'keep iff base in whitelist' semantics (every det here is already team=='enemy' by construction --
+    ``tt_bill_dets`` only ever emits enemy-verdict tracks -- so there is no 'never filter non-enemy'
+    passthrough branch to reuse from that function, unlike its raw-Unit-list callers). Applied to the
+    TRACKER'S OUTPUT, not to what is fed into ``tag()`` -- this mirrors play.py's own order, where the
+    whitelist filter (line 547) sits AFTER tagging (line 518), not before it, so tracking/hits accrual is
+    identical between a ``_tt`` condition and its ``_tt_wl`` sibling; only which confirmed sightings are
+    actually billed to the estimator differs."""
+    return [d for d in dets if d.base in whitelist]
 
 
 def cond_key(base: str, variant: str, both: bool) -> str:
@@ -756,7 +1050,8 @@ def _jsonable(obj):
 def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict,
                     warned_costless: Optional[set] = None, whitelist: Optional[frozenset] = None,
                     charge_trace: bool = False, estimator: str = "v1",
-                    v2_kwargs: Optional[dict] = None) -> tuple[list[dict], dict, list[dict], list[dict]]:
+                    v2_kwargs: Optional[dict] = None, tracker: bool = False,
+                    corr: bool = False) -> tuple[list[dict], dict, list[dict], list[dict]]:
     """Mirrors e1_eval.run_match's while-loop (same live policy, same accepted-play bookkeeping, IDENTICAL
     decisions at IDENTICAL ticks) but steps the engine STEP_TICKS at a time, updates every active
     estimator every step from the SAME det stream per condition, and records a per-tick truth/estimate row
@@ -766,7 +1061,11 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     two are always [] unless ``charge_trace`` is set, in which case condition A's active variant(s) become
     Traced* estimators (module docstring O10/O13) and rows carry an ``estimator`` field; every other
     condition (A+, A_wl, B) is untouched regardless of this flag. ``whitelist``: FIX 4's
-    ``load_detector_cards()`` result, required for A_wl."""
+    ``load_detector_cards()`` result, required for A_wl. ``tracker``/``corr``: O16(c) -- both default
+    False, in which case every condition below iterates ``active_base_conds(False, False) == BASE_CONDS``
+    and this function's behaviour is BYTE-IDENTICAL to before O16. ``tracker`` adds ``B_tt`` (module
+    docstring O16(a)); ``corr`` adds ``B_corrS``/``B_corrL`` (O16(b)); both together additionally add
+    ``B_corrS_tt``/``B_corrL_tt``."""
     if warned_costless is None:
         warned_costless = set()
     if whitelist is None:
@@ -779,6 +1078,7 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         raise SystemExit(f"--estimator must be v1/v2/both, got {estimator!r}")
     variants = ("v1", "v2") if estimator == "both" else (estimator,)
     both_mode = len(variants) > 1
+    bases = active_base_conds(tracker, corr)      # O16(c): BASE_CONDS unchanged when both flags are off
 
     t0 = time.perf_counter()
     state = env.reset(entry)
@@ -787,6 +1087,25 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     tag = str(entry["tag"])
     rng_obs = np.random.default_rng(obs_seed(tag, k))          # e1_eval-identical stream -- POLICY ticks only
     rng_obs_b5 = np.random.default_rng(b5_seed(tag, k))        # harness-local -- NON-policy 5-tick steps only
+    # O16(b): each corr setting gets its OWN per-match track-state dict and its OWN RNG stream -- never
+    # shared with e1_eval's streams, b5's, or each other. Unused (None) unless --corr.
+    corrS_state = new_state() if corr else None
+    corrL_state = new_state() if corr else None
+    rng_corrS = np.random.default_rng(corrS_seed(tag, k)) if corr else None
+    rng_corrL = np.random.default_rng(corrL_seed(tag, k)) if corr else None
+    corr_view_of: dict[str, Any] = {}    # this tick's {"B_corrS": BoardState, "B_corrL": BoardState}
+    # O16(a): one TeamTracker (+ its own "already billed" track-id set) per stream that needs tracker-input
+    # billing this run. Live's own construction defaults (make_team_tracker) -- see module docstring O16(a).
+    team_trackers: dict[str, TeamTracker] = {}
+    billed_ids: dict[str, set] = {}
+    if tracker:
+        team_trackers["B_tt"] = make_team_tracker(db)
+        billed_ids["B_tt"] = set()
+        if corr:
+            team_trackers["B_corrS_tt"] = make_team_tracker(db)
+            billed_ids["B_corrS_tt"] = set()
+            team_trackers["B_corrL_tt"] = make_team_tracker(db)
+            billed_ids["B_corrL_tt"] = set()
     policy, grid, device = cfg["policy"], cfg["grid"], cfg["device"]
     unmapped: set = set()
     done_plays: list[tuple[int, int, float, float]] = []
@@ -796,7 +1115,21 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     # when --charge-trace is set -- byte-identical to before O13 for the default v1-only, untraced-elsewhere
     # case (TracedEstimator IS-A TrackedEstimator, so ._est/.charged_by_base are unaffected either way).
     estimators = {(base, variant): make_estimator(variant, db, charge_trace and base == "A", v2_kwargs)
-                  for base in BASE_CONDS for variant in variants}
+                  for base in bases for variant in variants}
+
+    def my_elixir_of(base: str) -> float:
+        """O16(c): which degraded/perfect my_elixir a base condition reads. B_tt/B_tt_wl/B_corr* and
+        their _tt/_tt_wl siblings all read the SAME my_elixir as their parent raw-det condition --
+        tracker-input billing (and whitelist-filtering its output) changes only which ENEMY dets the
+        estimator sees, never how it reads its own hand's elixir."""
+        if base in ("B", "B_tt", "B_tt_wl"):
+            return view.my_elixir
+        if base in ("B_corrS", "B_corrS_tt", "B_corrS_tt_wl"):
+            return corr_view_of["B_corrS"].my_elixir
+        if base in ("B_corrL", "B_corrL_tt", "B_corrL_tt_wl"):
+            return corr_view_of["B_corrL"].my_elixir
+        return bs.my_elixir
+
     inited = False
     prev_truth: Optional[float] = None
     ticks: list[dict] = []
@@ -821,11 +1154,23 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         # byte-identical to attempt 1 / e1_eval), the harness-local stream on the 5-tick-only steps in
         # between (CHANGE 1 -- e1_eval has no cadence of its own for those).
         view = live_view(bs, rng_obs if pol_tick else rng_obs_b5, deck, Noise())
+        if corr:
+            corr_view_of["B_corrS"] = corr_live_view(bs, corrS_state, rng_corrS, deck, CORR_SHORT)
+            corr_view_of["B_corrL"] = corr_live_view(bs, corrL_state, rng_corrL, deck, CORR_LONG)
+        if tracker:
+            # ground-truth princess alive flags feed the tracker's pocket gating (module docstring
+            # O16(a) construction cite: MORE faithful than the two offline audit tools' fixed "assume
+            # towers alive" simplification, since this harness -- unlike them -- HAS engine ground
+            # truth available at zero extra cost; a deliberate, documented improvement, not a drift
+            # from their pattern for anything that pattern was actually forced to approximate).
+            mine_alive = (bs.towers[1].alive, bs.towers[2].alive)
+            enemy_alive = (bs.towers[4].alive, bs.towers[5].alive)
+            for tt in team_trackers.values():
+                tt.set_towers(mine_alive, enemy_alive)
         if not inited:
-            for base in BASE_CONDS:
-                my_e = view.my_elixir if base == "B" else bs.my_elixir
+            for base in bases:
                 for variant in variants:
-                    estimators[(base, variant)].reset(my_elixir=my_e, now=bs.t_sec)
+                    estimators[(base, variant)].reset(my_elixir=my_elixir_of(base), now=bs.t_sec)
             inited = True
 
         truth = float(bs.opp_elixir)
@@ -844,6 +1189,35 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
                         "A_wl": (wl_dets, bs.my_elixir), "B": (b_dets, view.my_elixir)}
         n_by_base = {"Aplus": n_enemy(bs.units) + n_enemy(bs.spells), "A": n_enemy(bs.units),
                     "A_wl": sum(1 for d in wl_dets if d.team == "enemy"), "B": n_enemy(view.units)}
+        # O16(a): B_tt is billed from B's OWN det stream (b_dets, drawn above -- no new noise). O16(b):
+        # each corr setting's raw-det condition uses its own corr_live_view output; O16(a)+(b) together
+        # bill it through that same setting's own TeamTracker. n_enemy_dets_* for a _tt/_tt_wl condition
+        # counts dets BILLED this sample (tracks newly confirmed), NOT raw enemy dets visible -- module
+        # docstring. Attempt 2 FIX 2(b): each _tt condition's "_wl" sibling is the SAME billed-dets list
+        # (one tag()/billing call feeds both -- tracking/hits accrual must not fork), filtered to live's
+        # detector_cards whitelist AFTER billing (mirrors play.py:547's filter sitting after tag() at
+        # play.py:518, not before it).
+        if "B_tt" in team_trackers:
+            tt_b = tt_bill_dets(team_trackers["B_tt"], b_dets, bs.t_sec, billed_ids["B_tt"])
+            tt_b_wl = filter_whitelisted_billed_dets(tt_b, whitelist)
+            dets_by_base["B_tt"] = (tt_b, view.my_elixir)
+            dets_by_base["B_tt_wl"] = (tt_b_wl, view.my_elixir)
+            n_by_base["B_tt"] = len(tt_b)
+            n_by_base["B_tt_wl"] = len(tt_b_wl)
+        if corr:
+            for name in ("B_corrS", "B_corrL"):
+                cview = corr_view_of[name]
+                cdets = dets_of(cview.units)
+                dets_by_base[name] = (cdets, cview.my_elixir)
+                n_by_base[name] = n_enemy(cview.units)
+                tt_name = name + "_tt"
+                if tt_name in team_trackers:
+                    ttd = tt_bill_dets(team_trackers[tt_name], cdets, bs.t_sec, billed_ids[tt_name])
+                    ttd_wl = filter_whitelisted_billed_dets(ttd, whitelist)
+                    dets_by_base[tt_name] = (ttd, cview.my_elixir)
+                    dets_by_base[f"{tt_name}_wl"] = (ttd_wl, cview.my_elixir)
+                    n_by_base[tt_name] = len(ttd)
+                    n_by_base[f"{tt_name}_wl"] = len(ttd_wl)
 
         # O13 attempt 2 FIX 6b (verifier, LOW): compute every estimate FIRST, into a plain dict, then build
         # `row` in two separate passes (all est_* fields, THEN all n_enemy_dets_* fields, THEN the three
@@ -854,7 +1228,7 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
         # unchanged). Verified by TestTicksRowKeyOrder below: a stub v1-only row's ``list(row)`` matches the
         # exact historical key sequence.
         est_vals: dict[tuple[str, str], float] = {}
-        for base in BASE_CONDS:
+        for base in bases:
             dets, my_e = dets_by_base[base]
             for variant in variants:
                 est = estimators[(base, variant)]
@@ -875,10 +1249,10 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
 
         row = {"tag": tag, "k": int(k), "tick": tick, "t_sec": round(bs.t_sec, 3), "phase": phase_of(bs),
               "truth": truth, "truth_drop": round(truth_drop, 4)}
-        for base in BASE_CONDS:
+        for base in bases:
             for variant in variants:
                 row[tick_field(base, variant, both_mode, "est")] = est_vals[(base, variant)]
-        for base in BASE_CONDS:
+        for base in bases:
             for variant in (variants if both_mode else variants[:1]):
                 row[tick_field(base, variant, both_mode, "n_enemy_dets")] = n_by_base[base]
         row["is_opp_play_tick"] = False   # FIX 2: filled in below from env.ghost_events, not here
@@ -905,9 +1279,11 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
                     done_plays.append((tick, d["slot"], x, y))
                     last_play_tick = tick
                     base_key = vocab.base_key(deck.cards[d["slot"]])
-                    for base in BASE_CONDS:
+                    for base in bases:
                         for variant in variants:
                             estimators[(base, variant)].record_my_play(base_key)
+                    for tt in team_trackers.values():                # O16(a): own-play anchor, every tracker
+                        tt.record_play(x, y, bs.t_sec, base=base_key)
                     is_my_play_tick = True
 
         row["is_my_play_tick"] = bool(is_my_play_tick)
@@ -934,7 +1310,7 @@ def run_match_audit(env, model, deck, db: CardDB, entry: dict, k: int, cfg: dict
     ghost_delivered = ghost_delivered_by_base(dict(env.ghost_cards_delivered), db, warned_costless)
     ghost_delivered_total = sum(v[1] for v in ghost_delivered.values())
     charged_by_base = {cond_key(base, variant, both_mode): dict(estimators[(base, variant)].charged_by_base)
-                       for base in BASE_CONDS for variant in variants}
+                       for base in bases for variant in variants}
     over_charge_at_end = {cond: round(sum(v[1] for v in d.values()) - ghost_delivered_total, 2)
                           for cond, d in charged_by_base.items()}
     summary = {"tag": tag, "k": int(k), "n_ticks": len(ticks), "decisions": n_dec, "plays_accepted": n_acc,
@@ -985,6 +1361,17 @@ def build_parser() -> argparse.ArgumentParser:
                     "OpponentElixirEstimator[V2] backs every condition (A+/A/A_wl/B). 'v1' (default) is "
                     "byte-identical in shape to before O13. 'both' runs every condition for BOTH "
                     "estimators from the same det stream, condition keys suffixed _v1/_v2.")
+    ap.add_argument("--tracker", action="store_true", help="O16(a): add conditions B_tt/B_tt_wl -- bill "
+                    "from a live-default TeamTracker's first-confirmed-sighting (>= min_hits) tracks over "
+                    "condition B's own det stream, instead of raw per-frame dets. IDEALISED design under "
+                    "test, not live's current path (live has no such gate on the estimator path); _wl is "
+                    "the live-reachable sibling (billed det's base must clear detector_cards too). With "
+                    "--corr, also adds B_corrS_tt/B_corrS_tt_wl/B_corrL_tt/B_corrL_tt_wl over the "
+                    "correlated streams. OFF by default -- no effect on existing runs.")
+    ap.add_argument("--corr", action="store_true", help="O16(b): add conditions B_corrS/B_corrL -- the same "
+                    "per-sample marginals as condition B's live_view, but temporally CORRELATED noise "
+                    "(pipeline/opp_est_degrade_corr.py; SHORT/LONG persistence settings, both always run). "
+                    "OFF by default -- no effect on existing runs.")
     ap.add_argument("--out", type=Path, required=True)
     return ap
 
@@ -1049,7 +1436,8 @@ def main(argv=None) -> int:
                 try:
                     match_rows, msummary, ch_rows, tr_rows = run_match_audit(
                         env, model, deck, db, entry, k, cfg, warned_costless, whitelist,
-                        charge_trace=charge_trace, estimator=a.estimator)
+                        charge_trace=charge_trace, estimator=a.estimator,
+                        tracker=bool(a.tracker), corr=bool(a.corr))
                 except Exception as exc:
                     print(f"[opp_est_audit] ERROR on {entry['tag']} k={k}: {exc!r}", flush=True)
                     return 3
@@ -1082,8 +1470,9 @@ def main(argv=None) -> int:
     # UNSUFFIXED, byte-identical to before O13; 'both' suffixes every key '_v1'/'_v2' (ticket 3).
     variants = ("v1", "v2") if a.estimator == "both" else (a.estimator,)
     both_mode = len(variants) > 1
-    COND_DEFS = (("Aplus_perfect_detection_with_spells", "Aplus"), ("A_perfect_detection", "A"),
-                ("A_wl_live_whitelist", "A_wl"), ("B_degraded_live", "B"))
+    # O16(c): build_cond_defs(False, False) == the old hardcoded 4-tuple exactly (tuple equality, see
+    # TestActiveBaseConds/TestBuildCondDefs) -- --tracker/--corr off leaves this byte-identical to before.
+    COND_DEFS = build_cond_defs(bool(a.tracker), bool(a.corr))
 
     def long_key(long_name: str, variant: str) -> str:
         return f"{long_name}_{variant}" if both_mode else long_name
@@ -1130,10 +1519,30 @@ def main(argv=None) -> int:
          f"estimator_step={cfg['estimator_step']}", "",
          "| condition | MAE | bias | P90\\|err\\| | share<=1.0 | share<=2.0 |",
          "|---|---|---|---|---|---|"]
+    # O16 attempt 2 FIX 2(a) (verifier, MEDIUM): every "_tt" label says plainly that confirmed-track
+    # billing is an IDEALISED DESIGN UNDER TEST, not live's actual estimator path -- live bills every
+    # enemy-tagged, whitelisted det every frame with NO min_hits gate at all (play.py:547,558; that gate
+    # lives only in enemy_tracks(), which feeds threat/aim logic, never the elixir estimator). The "_wl"
+    # siblings (FIX 2(b)) are the LIVE-REACHABLE version: same confirmed-track billing, but the billed
+    # det's base must also clear live's detector_cards whitelist, exactly as play.py:547 would gate it.
     BASE_LABELS = {"Aplus_perfect_detection_with_spells": "A+ perfect detection (+spells, no whitelist)",
                   "A_perfect_detection": "A perfect detection (units only, NO whitelist -- loose upper bound)",
                   "A_wl_live_whitelist": "A_wl perfect detection (units only, live's detector_cards whitelist)",
-                  "B_degraded_live": "B degraded (live)"}
+                  "B_degraded_live": "B degraded (live)",
+                  "B_tt_tracker_input_idealised": "B_tt IDEALISED: bill once per TeamTracker-confirmed "
+                      "track (min_hits), no whitelist -- a design under test, NOT live's current path",
+                  "B_tt_wl_tracker_input_live_whitelist": "B_tt_wl live-reachable: B_tt's billing, "
+                      "restricted to live's detector_cards whitelist",
+                  "B_corrS_short_correlated": "B_corrS correlated-degrade, SHORT persistence",
+                  "B_corrS_tt_short_correlated_tracker_input_idealised": "B_corrS_tt IDEALISED "
+                      "tracker-input on SHORT correlated -- design under test, NOT live's current path",
+                  "B_corrS_tt_wl_short_correlated_tracker_input_live_whitelist": "B_corrS_tt_wl "
+                      "live-reachable tracker-input on SHORT correlated",
+                  "B_corrL_long_correlated": "B_corrL correlated-degrade, LONG persistence",
+                  "B_corrL_tt_long_correlated_tracker_input_idealised": "B_corrL_tt IDEALISED "
+                      "tracker-input on LONG correlated -- design under test, NOT live's current path",
+                  "B_corrL_tt_wl_long_correlated_tracker_input_live_whitelist": "B_corrL_tt_wl "
+                      "live-reachable tracker-input on LONG correlated"}
     labels = {long_key(long_name, variant): BASE_LABELS[long_name] + (f" [{variant}]" if both_mode else "")
              for long_name, _base in COND_DEFS for variant in variants}
     for key, _, _cond in conds:
@@ -1180,7 +1589,10 @@ def main(argv=None) -> int:
             tag = f"{base}_{variant}" if both_mode else base
             done_metrics[f"{tag}_mae"] = m["mae"]
             done_metrics[f"{tag}_bias"] = m["mean_bias"]
-            if base == "A_wl":
+            if base in ("A_wl", "B_tt", "B_tt_wl", "B_corrS", "B_corrL", "B_corrS_tt", "B_corrS_tt_wl",
+                       "B_corrL_tt", "B_corrL_tt_wl"):
+                # O16: the new conditions' whole point is over-charge behaviour -- surface it in the
+                # condensed OPP_EST_AUDIT_DONE line too, not just summary.json (A_wl unchanged).
                 done_metrics[f"{tag}_total_over_charge"] = m["overcharge"]["total_over_charge"]
                 done_metrics[f"{tag}_over_charge_share_never_played"] = m["overcharge"][
                     "over_charge_share_from_bases_never_played"]
