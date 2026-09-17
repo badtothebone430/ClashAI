@@ -320,4 +320,239 @@ HEAD, CRLF-normalisation aside, before editing began each file). No config defau
 never setting `play.opp_elixir_v2` / `play.opp_elixir_v2_shadow` in config.yaml is already a full
 behavioural revert without touching code at all.
 
+## Attempt 3
+
+Coordinator: attempt 2 verified and COMMITTED (`b814f5a`, both flags default False, behaviourally identical
+to HEAD). Worked from the committed tree (confirmed `git status --porcelain` clean on the three write-set
+files before touching anything). Backed up the NEW baseline (attempt-2-as-committed) under
+`*.o19.a3.orig` in `scratchpad/gauntlet/L67/opp_fix/backup/` (md5 matches HEAD `b814f5a` exactly, before any
+attempt-3 edit) -- the original `*.o19.orig` backups (pre-O19, HEAD `3d8ad52`) are left untouched as the
+still-valid original-baseline revert point.
+
+### Unplanned real fix found mid-attempt: three tests were coupled to the LIVE config.yaml
+
+While re-verifying near the end of this attempt, `test_the_flag_reads_like_student_opp_elixir_and_really_
+defaults_to_False` FAILED -- `icebow/config/config.yaml` had, mid-session, gained
+`play.opp_elixir_v2: true` and `play.student_opp_elixir: true` (owner commit context: "L67bp/L67bo (owner
+2026-09-17)... use OpponentElixirEstimatorV2... let the S1 student SEE the estimate" -- the owner turning
+THIS EXACT feature on for a real experiment while this ticket's polish pass was still in flight, plus an
+unrelated `preview.enabled: false -> true`). Three of this attempt's own "defaults to X" tests
+(`test_the_flag_reads_like_student_opp_elixir_and_really_defaults_to_False`, `test_the_shadow_flag_defaults_
+off`, `test_the_interval_constant_reads_like_a_neighbouring_cadence_and_defaults_to_10s`) had loaded the REAL
+`Config.load()` and asserted against its CURRENT contents -- coupling a unit test to a live, owner-editable
+file entirely outside this ticket's write set, something that had not yet been true at the moment each test
+was written (config.yaml did not set any of these keys then) but predictably stopped being true the moment
+someone else edited that file, unrelated to any defect in this ticket's own code. Fixed by adding `_StubCfg`
+(returns the `default` kwarg regardless of section/key, i.e. simulates "key absent") and switching all three
+tests to eval() the real expression against `_StubCfg()` instead of a loaded `Config` -- this proves the
+CODE's own fallback value, decoupled from the file's current state, so it cannot break again the same way
+regardless of what the owner sets in config.yaml next. `config.yaml` itself is untouched by this session (it
+is not in the write set and its content is the owner's live decision, not this ticket's to make or revert).
+
+### FIX 1 (the one that matters for a real session) -- rate-limit the shadow log
+
+Confirmed the defect by reading: the shadow print sat directly inside `if _opp_elixir_v2_shadow:` with no
+gate at all, so it fired every decision (every `act_period`, ~1.5s by default, or faster whenever a
+perception "new enemy commitment" event fires one early, floor `_react_min_gap` 0.3s) -- worse than
+"per act-loop frame" in the literal sense (the 6Hz poll loop), but still capable of multiple prints/second
+on a busy board over a multi-minute match.
+
+**Existing cadence pattern found and reused** (per the instruction, not invented): `trigger = now - last_act
+>= act_period` / `last_act = now`, play()'s own act-loop cadence gate a few dozen lines below the shadow log
+site. Added `_opp_elixir_v2_shadow_log_every_s` (code default 10.0s), read via the SAME `cfg.get("play",
+<key>, default=...)` shape every neighbouring play() constant uses (e.g. `_react_min_gap` a few lines away)
+-- there was no existing periodic-LOG throttle specifically to mirror (searched for `_wall`-based cadences,
+count-based `% N == 0` rate limits, and elapsed-time gates throughout play.py; the closest true periodic-log
+throttle is the count-based `_student.stats["log_n"] % 10 == 0`, the closest ELAPSED-TIME cadence is
+`act_period`'s own gate -- reused the latter's exact `now - last >= period` shape since the ask was
+specifically for a WALL-CLOCK-based cadence). `_shadow_log = {"last_t": 0.0, "sum_abs_diff": 0.0, "n": 0}`:
+`sum_abs_diff`/`n` accumulate on EVERY decision (not just print ticks, so a 10s-apart pair of prints still
+reports the true mean over everything in between); the print itself (both estimates, their diff, and
+`mean_abs_diff` since match start) is gated on `now - last_t >= _opp_elixir_v2_shadow_log_every_s`.
+`_shadow_log` resets alongside `_opp_bill["billed"].clear()` at the match boundary, so the mean is PER
+MATCH, not since process start.
+
+**Tests** (new, `OppElixirV2ShadowLogThrottle`, AST-based since this logic has no free-standing expression
+or importable function -- same play()-cannot-be-called caveat as every other class in this file): the
+interval constant reads like a neighbouring cadence and defaults to 10.0s (behavioural eval); the
+accumulation statements are DIRECT children of the outer `if _opp_elixir_v2_shadow:` block (not nested
+inside the throttle gate, i.e. they run every decision) while the `print()` call IS inside the throttle
+gate, and there is exactly one of each (AST walk, not a text grep); `last_t` is only ever reassigned inside
+the throttle gate (otherwise the throttle could never re-arm); the state reset sits beside the billed-set
+reset (text/ordering pin, same reasoning as the file's other reset-ordering tests).
+
+### FIX 2 (verifier-found weak tests)
+
+- `test_mem5_and_s1_lines_never_mention_the_shadow_estimator` (grepped the word "shadow" out of ONE line of
+  text) -> REMOVED, replaced with three PROVABLE AST checks: `test_est_is_assigned_only_from_opp_elx_never_
+  the_shadow` (every assignment to the name `_est` anywhere in play.py -- there are exactly two, the OFF and
+  ON branches -- must reference `_opp_elx` and must NOT reference `_opp_elx_shadow`/`_shadow_est` anywhere
+  in its own expression tree), `test_mem5_is_assigned_only_from_est_never_the_shadow` (same style for
+  `mem[5]`'s own assignment), `test_oe_is_derived_only_from_opp_elx_never_the_shadow` (same style, eval()-
+  able expression, AST-checked). None of these three would pass if `_est`/`mem[5]`/`_oe` were EVER
+  reassigned from the shadow estimator under any name or any condition -- unlike the old test, which checked
+  one line's literal text and nothing else.
+- `test_bill_confirmed_agrees_with_the_unlocked_helper_on_the_same_tracker` (one track, `(base, team)` only)
+  -> REPLACED with `test_bill_confirmed_matches_the_unlocked_helper_in_full_order_on_three_tracks`: three
+  distinct tracks, the full `(base, cx, gy, team)` tuple, and the exact sequence asserted both ways (locked
+  == expected, unlocked == expected, locked == unlocked) -- matching the verifier's own probe. Order matters
+  because `OpponentElixirEstimatorV2._cluster_new` consumes its input by popping from the end of whatever
+  order it is handed, so a silently reordered billing output would change which points get clustered
+  together.
+
+### FIX 3 (accuracy)
+
+**Text-pin count.** Recounted by hand: SIX literal `assertIn`/`assertNotIn` checks against raw `_src()`
+text across the O19 test classes (not counting the pre-existing, pre-ticket `PlayTrackerWiring` test),
+spread over five tests, not the three attempt 2's docstring named:
+`test_off_path_update_call_is_unchanged` (1), `test_on_path_bills_via_the_shared_tracker_and_reapplies_the_
+whitelist` (3 -- attempt 2 undercounted this one specifically, treating it as one fact instead of three),
+`test_shadow_estimator_is_reset_alongside_the_primary_one` (1), `test_billing_input_is_shared_by_v2_and_
+shadow_v2` (1, not previously labelled at all). All five are now individually labelled `TEXT PIN` at their
+point of use, and both class docstrings (`OppElixirV2Wiring`, `OppElixirV2ShadowWiring`) state the count and
+list every one, with the reason none of them has a free-standing expression to `eval()` (each is a fact
+about a multi-statement control-flow block, not a single assignment). `test_match_reset_clears_the_billed_
+set_alongside_the_estimator_reset` uses `src.index(...)` + `assertLess` rather than `assertIn`/`assertNotIn`
+-- also source-text-dependent and also labelled TEXT PIN, but not counted in the "six" (that count tracks
+literal-substring-presence checks specifically, matching how the verifier itself apparently counted).
+
+**Test-count accuracy.** Reported "175 passed" in the attempt-2 handback for a NAMED 10-file subset (every
+test file in `icebow/tests/` that imports `clashrl.perception` or `clashrl.opponent_elixir`, grep-confirmed,
+plus this ticket's own two files) -- that command and file list were exact and reproduce (see "Verification
+run" below: the same 10 files now total 183, +8 for this attempt's new wiring-file tests, exactly accounting
+for the delta). It was never a claim about the FULL suite -- the verifier's "29 in the wiring file" matches
+what I reported for attempt 2 exactly (my own handback said "19 → 29 tests, all passing"); the verifier's
+"1524 in the full suite" is a number I never generated or reported, since I explicitly said in the attempt-2
+handback that I started a full-suite background run and STOPPED it early (for an unrelated slow test) rather
+than reporting its count. Any reader inferring "175" was meant to describe the full suite would be reading
+past what was actually written; noted here so it is not repeated.
+
+### FIX 4 (factual: `_BilledDet` "immutable")
+
+Confirmed the defect: attempt 1/2's `_BilledDet` was a plain `__slots__` class, which does NOT prevent
+attribute reassignment (`d.base = "x"` succeeds silently) -- the verifier demonstrated exactly that. Fixed
+by making it a real `@dataclass(frozen=True, slots=True)`: reassignment now raises `FrozenInstanceError`,
+so "immutable" is literally true rather than aspirational. The property that was ALREADY true and remains
+the one `bill_confirmed`'s own correctness actually depends on -- NON-ALIASING (`str()`/`float()` copies at
+construction, no shared dict/list with the tracker) -- is now documented explicitly as the load-bearing one,
+with frozen-ness as an added, now-genuine guarantee on top. New test (`BilledDetImmutabilityTests`):
+reassigning a field raises `dataclasses.FrozenInstanceError` and leaves the original value untouched;
+positional construction with the default `team="enemy"` still works unchanged.
+
+### INVESTIGATE -- the 1501 -> 1524 full-suite delta
+
+Done cleanly (two full-suite runs, ~5.5-6 min each, `cd icebow && PYTHONPATH=src
+../icebow/.venv/Scripts/python.exe -m pytest tests/ -q --ignore=tests/test_cr_web.py`):
+
+- **With attempt 3's changes** (current working tree): `1 failed, 1504 passed, 21 skipped, 1 warning, 517
+  subtests passed in 345.46s`. The one failure, `test_xbow_into_push.py::XbowIntoPushTests::test_the_
+  clamped_frontmost_ROW_counts_as_forward`, is UNRELATED (X-Bow row-clamp vs `xbow_front`, nothing to do
+  with opponent-elixir/perception) -- confirmed pre-existing by re-running just that file against HEAD
+  (below), not something these changes touch or could plausibly cause.
+- **Baseline, my three files reverted to HEAD `b814f5a`** (attempt-2-committed; via `git stash push --
+  icebow/src/clashrl/play.py icebow/src/clashrl/perception.py icebow/tests/test_play_tracker_wiring.py`,
+  confirmed clean with `git status --porcelain` before running, `git stash pop` immediately after to
+  restore -- confirmed via `git diff --stat` matching pre-stash exactly and `git stash list` empty
+  afterward; tree was never left dirty): `1 failed, 1496 passed, 21 skipped, 1 warning, 517 subtests passed
+  in 338.49s`. Same lone `test_xbow_into_push.py` failure, confirmed pre-existing (`pytest tests/test_xbow_
+  into_push.py -q` against this exact reverted tree: `1 failed, 18 passed, 15 subtests passed`).
+
+**Delta explained, cleanly, for MY OWN two states**: 1504 - 1496 = **+8 passed**, which is EXACTLY the
+wiring file's own growth this attempt (29 -> 37). Zero unattributed tests between "attempt 2 committed" and
+"attempt 3" -- every new test in the full suite traces to `test_play_tracker_wiring.py`.
+
+**The ORIGINAL "1501 -> 1524" / "~11 unattributed" question (attempt 1 -> attempt 2)**: NOT fully
+reconciled, and said so rather than guessed. My own measured numbers (1496 baseline / 1504 with changes) do
+not match either "1501" or "1524" -- expected, since these are DIFFERENT commits/scopes than whatever the
+verifier ran (my attempt 1 was never committed to git at all per the attempt-2 kickoff message -- "the lead
+reverted your play.py/test edits to HEAD" -- so there is no commit corresponding to a clean "attempt-1
+full-suite" state for me to re-run). One CONCRETE, VERIFIED contributing factor, found cheaply (no test run
+needed): the concurrent O18 worker's commit (`ab76edb`, landed between my attempt 1 and attempt 2) added
+tests to `pipeline/tests/test_opp_est_audit.py` -- a file this ticket never touches, outside `icebow/tests/`
+entirely -- `git show 3d8ad52:pipeline/tests/test_opp_est_audit.py | grep -c "def test_"` = 78 vs `git show
+ab76edb:...` = 98, i.e. **+20 test functions**, matching that commit's own message ("Worker's '26 new tests'
+was 20; total 98 is correct"). This would only appear in a "full suite" count whose SCOPE includes
+`pipeline/tests/` alongside `icebow/tests/` -- my own runs (`cd icebow && pytest tests/`) do not, and there
+is no repo-root `pytest.ini`/`conftest.py` that would sweep both automatically, so I cannot confirm the
+verifier's command included it. +20 also does not equal "~11" on its own. Stopping here per the ticket's own
+instruction (a bookkeeping question, not a defect) rather than chasing the exact reconciliation further;
+flagging the O18 commit as the most concrete lead found, not a proven full explanation.
+
+**Config.yaml side-observation (not caused by this session)**: after the two full-suite runs, `git status`
+showed `icebow/config/config.yaml` modified (`preview.enabled: false -> true`, one line) -- NOT part of
+either `git stash` operation (which only ever touched the three named files) and not written by any test or
+by me. Given the coordinator's own note that "the engine is BUSY with an experiment" on this machine, this
+is almost certainly that separate, concurrently-running process writing to the shared config file, not an
+effect of this session's test runs. Left untouched (out of this ticket's write set); noted so it is not
+mistaken for something this session did.
+
+### Verification run (attempt 3)
+
+`cd icebow && PYTHONPATH=src ../icebow/.venv/Scripts/python.exe -m pytest tests/test_play_tracker_wiring.py
+-v` -> **37 passed** (33 carried from attempt 2 minus 1 removed/replaced weak test plus 5 new: 2
+`BilledDetImmutabilityTests`, 3 net new in `OppElixirV2ShadowWiring` replacing the 1 removed weak test, 4
+new `OppElixirV2ShadowLogThrottle` -- exact arithmetic: attempt 2 had 29; +2 from splitting the removed
+mem5/shadow test into three AST tests (net +2, since 1 was removed and 3 added); +1 from splitting the
+bill_confirmed order test (replaces 1, itself unchanged count -- net 0); +2 `BilledDetImmutabilityTests`;
++4 `OppElixirV2ShadowLogThrottle` = 29 + 2 + 0 + 2 + 4 = 37, matching pytest's own collected count).
+
+Named 10-file subset (every test file under `icebow/tests/` importing `clashrl.perception` or
+`clashrl.opponent_elixir`, grep-confirmed, plus this ticket's two files): `pytest tests/test_play_tracker_
+wiring.py tests/test_opponent_elixir.py tests/test_opponent_elixir_v2.py tests/test_play_no_cnn.py tests/
+test_live_opponent.py tests/test_perception_with_base_i9.py tests/test_reaction_and_phantoms.py tests/
+test_spell_phantom_credit.py tests/test_env_init_attrs.py tests/test_zone_team_billing.py -q` -> **183
+passed** (175 in attempt 2's report + 8 = matches the wiring file's 29->37 delta exactly).
+
+Full suite (`tests/ --ignore=tests/test_cr_web.py`), WITH this attempt's changes: **1504 passed, 1 failed
+(pre-existing, unrelated -- see INVESTIGATE above), 21 skipped, 517 subtests passed** in 345.46s.
+
+`ast.parse` and `py_compile.compile` on all three edited files -> OK.
+
+### ACCEPTANCE
+
+- Tests green, exact commands/counts above (37 / 183 / 1504 of 1505 relevant -- see INVESTIGATE for the one
+  pre-existing, unrelated failure). Re-confirmed AFTER the config.yaml-coupling fix above, final numbers
+  unchanged (still 37 in the wiring file, still 183 in the named subset -- that fix corrected HOW three
+  tests check a default, not how many tests exist).
+- `git diff --stat` limited to the three write-set files (confirmed after the stash round-trip AND after
+  the config.yaml-coupling fix): `icebow/src/clashrl/perception.py | 22 ++-`, `icebow/src/clashrl/play.py |
+  38 ++-`, `icebow/tests/test_play_tracker_wiring.py | 247 +++++++++++++++++++++++++++----`. No other
+  tracked file in this session's control shows a diff (config.yaml's changes are external -- see above).
+- Both flags still default False: `_opp_elixir_v2 = bool(cfg.get("play", "opp_elixir_v2", default=False))`,
+  `_opp_elixir_v2_shadow = bool(cfg.get("play", "opp_elixir_v2_shadow", default=False))`, both unchanged
+  from attempt 2 (only the new `_opp_elixir_v2_shadow_log_every_s` constant was added, default 10.0, and it
+  does nothing when the shadow flag itself is off).
+- Shadow path still never drives mem[5]/S1: reproven this attempt with three PROVABLE AST checks
+  (`test_est_is_assigned_only_from_opp_elx_never_the_shadow`, `test_mem5_is_assigned_only_from_est_never_
+  the_shadow`, `test_oe_is_derived_only_from_opp_elx_never_the_shadow`), replacing the weak one-line grep
+  FIX 2 flagged.
+
+### Exact revert (attempt 3)
+
+Note: HEAD moved twice more during this attempt, to `a797ca0` (commit-message-only fix, no code diff) then
+`51b0574` (an unrelated experiment chain) -- confirmed all three write-set files are BYTE-IDENTICAL between
+`b814f5a` and current HEAD (`git show <rev>:<file> | md5sum` matches for all three), so nothing below is
+affected by that drift; `git checkout -- <path>` against current HEAD gives exactly the attempt-2-committed
+content either way.
+
+`git checkout -- icebow/src/clashrl/play.py icebow/src/clashrl/perception.py
+icebow/tests/test_play_tracker_wiring.py` (current HEAD, content identical to `b814f5a`, attempt-2-
+committed) -- or restore
+byte-for-byte from `scratchpad/gauntlet/L67/opp_fix/backup/play.py.o19.a3.orig`,
+`perception.py.o19.a3.orig`, and `test_play_tracker_wiring.py.o19.a3.orig` (all three md5-verified against
+HEAD `b814f5a` before this attempt's edits began, CRLF-normalisation aside). Reverting further, to before
+O19 existed at all, still works via the original `*.o19.orig` backups against HEAD `3d8ad52`. No config
+default was touched by this session (config.yaml's observed diff is external, see above), so simply never
+setting `play.opp_elixir_v2` / `play.opp_elixir_v2_shadow` in config.yaml remains a full behavioural revert
+with no code change at all.
+
+**Late update**: HEAD moved once more before this attempt finished, to `0ca20a5` ("enable opp_elixir_v2 and
+student_opp_elixir in icebow config (owner request, live test)") -- the owner has now COMMITTED the
+config.yaml change flagged above (`play.opp_elixir_v2: true`, `play.student_opp_elixir: true`) for an actual
+live trial of this exact feature. Confirmed the three write-set files are STILL byte-identical to `b814f5a`
+(unaffected by that commit, which touches only config.yaml), and `git status` on config.yaml is now clean
+(the owner's change is committed, not a stray working-tree edit). Per the ticket: engine not booted, live
+not run, unit tests only -- this session did neither, and the "revert" instructions above are unaffected by
+who else is now using the feature this ticket built.
+
 ## STATUS: complete

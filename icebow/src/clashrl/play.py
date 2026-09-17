@@ -201,6 +201,13 @@ def play(cfg) -> None:
     # `opp_elixir_v2` alone. If BOTH this and `opp_elixir_v2` are on, `opp_elixir_v2` wins the drive seat
     # (unchanged meaning) and the shadow log becomes "V1 (now the non-driving side) vs V2 (driving)".
     _opp_elixir_v2_shadow = bool(cfg.get("play", "opp_elixir_v2_shadow", default=False))
+    # O19 attempt 3 FIX 1 (verifier): the shadow log below is throttled to at most once per this many
+    # seconds -- same cfg.get(..., default=...) source/shape every other play() cadence constant uses
+    # (e.g. `_react_min_gap` a few lines below in the file), not a bespoke mechanism. Read even when the
+    # shadow flag is off (free -- one float() call) so it stays byte-identical in spirit to how every other
+    # flag-gated constant here is read unconditionally.
+    _opp_elixir_v2_shadow_log_every_s = float(
+        cfg.get("play", "opp_elixir_v2_shadow_log_every_s", default=10.0))
     # L67u F3 (LOGGING ONLY, owner 2026-09-11): wall-clock stamps on every [student] line, and the tray re-read after
     # each student tap, so the overlay clips can be aligned and a repeated tap told apart -- the card still in its
     # slot (the tap did not deploy) vs a different card that slid in (HANDOFF 5cs.99 Z). No decision reads these.
@@ -424,6 +431,13 @@ def play(cfg) -> None:
     # updated) unless play.opp_elixir_v2_shadow is set -- no extra cost at all when it is off.
     _opp_elx_shadow = ((OpponentElixirEstimator(_db) if _opp_elixir_v2 else OpponentElixirEstimatorV2(_db))
                        if _opp_elixir_v2_shadow else None)
+    # O19 attempt 3 FIX 1 (verifier): the shadow log was an UNTHROTTLED print on every decision -- a long
+    # session would drown the console in it. `last_t` gates the PRINT to at most once per
+    # `_opp_elixir_v2_shadow_log_every_s`; `sum_abs_diff`/`n` accumulate on EVERY decision regardless (so a
+    # 10 s-apart pair of prints still reports the true mean over everything in between, not just the two
+    # samples that happened to land on a print tick) and are reset with the match (below), so the mean is
+    # "since match start", per match, not since process start.
+    _shadow_log = {"last_t": 0.0, "sum_abs_diff": 0.0, "n": 0}
     _opp_bill = {"uid_counter": itertools.count(1), "billed": set()}   # O19: per-track billing state; used
     # whenever opp_elixir_v2 or opp_elixir_v2_shadow is True (see the update() call site and match-reset).
     # SIM/LIVE PARITY of opponent-memory slot 5 (HANDOFF 5cr.8, owner ruling 23:4x): the sim wrote OUR elixir into this
@@ -607,7 +621,16 @@ def play(cfg) -> None:
         # ALWAYS the class OTHER than whichever `_opp_elx` actually is (constructed at :~460), so this is a
         # genuine V1-vs-V2 comparison regardless of which flag drives mem[5]/S1 -- never a comparison of V2
         # against itself when both flags happen to be on. Neither `mem[5]` nor S1 ever read `_shadow_est`;
-        # it exists purely for this log line, at the EXISTING per-frame [play] cadence (no new sink).
+        # it exists purely for this log line.
+        # O19 attempt 3 FIX 1 (verifier, the one that matters for a real session): this used to `print` on
+        # EVERY decision, unthrottled -- a long session would drown the console in it, and it would be the
+        # first thing the owner saw. `_shadow_log["last_t"]`/`_opp_elixir_v2_shadow_log_every_s` gate the
+        # PRINT to at most once per that many seconds, same `now - last >= period` cadence shape play()
+        # already uses for its own act cadence (`trigger = now - last_act >= act_period`, further down this
+        # function) -- reused rather than a bespoke throttle. The running |diff| mean accumulates every
+        # decision regardless of whether this tick prints, so the eventual print is a genuine summary of
+        # everything since the last one (and, at the FIRST print, since match start), not just whatever the
+        # two samples on a print tick happened to show.
         if _opp_elixir_v2_shadow:
             if _opp_elixir_v2:
                 _shadow_est = _opp_elx_shadow.update(float(my_elixir), dets, now)   # shadow = V1, raw dets
@@ -615,9 +638,15 @@ def play(cfg) -> None:
             else:
                 _shadow_est = _opp_elx_shadow.update(float(my_elixir), _billed, now)  # shadow = V2, billed dets
                 _v1_val, _v2_val = _est, _shadow_est
-            print(f"[play] opp_elixir_v2_shadow V1={_v1_val * 10.0:.2f} V2={_v2_val * 10.0:.2f} "
-                  f"diff={(_v2_val - _v1_val) * 10.0:+.2f} driving={'V2' if _opp_elixir_v2 else 'V1'} "
-                  f"wall={_wall()}", flush=True)
+            _diff = (_v2_val - _v1_val) * 10.0
+            _shadow_log["sum_abs_diff"] += abs(_diff)
+            _shadow_log["n"] += 1
+            if now - _shadow_log["last_t"] >= _opp_elixir_v2_shadow_log_every_s:
+                _mean_abs = _shadow_log["sum_abs_diff"] / _shadow_log["n"]
+                print(f"[play] opp_elixir_v2_shadow V1={_v1_val * 10.0:.2f} V2={_v2_val * 10.0:.2f} "
+                      f"diff={_diff:+.2f} mean_abs_diff={_mean_abs:.2f} (n={_shadow_log['n']} since match "
+                      f"start) driving={'V2' if _opp_elixir_v2 else 'V1'} wall={_wall()}", flush=True)
+                _shadow_log["last_t"] = now
         mem[5] = _est if _mem5_source == "opp_estimate" else float(my_elixir) / 10.0
         blocks = []
         if want_identity:
@@ -1259,6 +1288,7 @@ def play(cfg) -> None:
                     if _opp_elx_shadow is not None:
                         _opp_elx_shadow.reset(my_elixir=float(vision.read_elixir(frame)), now=time.time())
                     _opp_bill["billed"].clear()   # O19: last match's billed uids must not block this match
+                    _shadow_log.update(last_t=0.0, sum_abs_diff=0.0, n=0)   # O19 attempt 3: mean is PER MATCH
                     if _student is not None:
                         _student.reset_match()    # L67i: play history must not cross a match boundary
                     if _ploop is not None and _ploop.running:

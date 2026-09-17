@@ -43,6 +43,19 @@ def _det(base, x, y, team="unknown"):
     return Detection(base, x, y, 0.05, 0.05, 0.9, team, None, None, None)
 
 
+class _StubCfg:
+    """O19 attempt 3: simulates an UNSET key the way `Config.get` behaves -- returns the `default` kwarg
+    regardless of section/key. Used wherever a test needs the code-level DEFAULT of a `cfg.get(..., default=
+    ...)` call, decoupled from whatever icebow/config/config.yaml currently contains: that file is live and
+    owner-editable, entirely outside this ticket's write set, and CAN legitimately set any of these flags to
+    True for a real experiment at any time (it did, mid-session, for play.opp_elixir_v2 itself -- see the O19
+    progress file's attempt-3 notes) -- a test asserting "False" against the REAL file would then fail for a
+    reason that has nothing to do with a defect in this code."""
+
+    def get(self, *_args, **kwargs):
+        return kwargs.get("default")
+
+
 class PlayTrackerWiring(unittest.TestCase):
     def test_play_passes_the_three_filters_env_py_passes(self):
         call = _construction()
@@ -158,17 +171,34 @@ class OppElixirV2Wiring(unittest.TestCase):
     to before this ticket. play() itself cannot be called in a unit test (WindowCapture/Controller/torch
     device need a live window), so every test here is source-located one way or another; where the ACTUAL
     expression can be eval()'d against a controlled namespace (construction, the S1 gate, the flag default)
-    that is done instead of a plain string match. Two facts are pure CONTROL-FLOW/ORDERING claims with no
-    expression to evaluate in isolation (the OFF branch's update() call has no free-standing local variable
-    to eval it against outside play() itself; a source-order comparison between two reset lines is only
-    meaningful in the real match-reset control flow) -- those two stay literal text pins, same convention as
-    the pre-existing PlayTrackerWiring.test_play_passes_the_three_filters_env_py_passes above, and are
-    labelled TEXT PIN below."""
+    that is done instead of a plain string match.
+
+    O19 attempt 3 FIX 3 (verifier, accuracy): this class carries SIX literal `assertIn`/`assertNotIn` checks
+    against raw source text, across THREE tests, all now labelled TEXT PIN at their point of use --
+    attempt 2's docstring undercounted this at "two" (it only named the two tests with no evaluable
+    free-standing expression at all; it missed that a THIRD test, checking a multi-statement CONTROL-FLOW
+    block rather than a single assignment, has no such expression either and carries three of the six
+    checks by itself):
+      - test_off_path_update_call_is_unchanged (1): the OFF branch's update() call has no free-standing
+        local variable to eval() it against outside play() itself.
+      - test_on_path_bills_via_the_shared_tracker_and_reapplies_the_whitelist (3): tracker reuse, "no second
+        TeamTracker", and whitelist placement are all facts about a multi-statement if/else block, not a
+        single expression -- there is nothing here shaped like `_rhs_of`/eval() can exercise in isolation.
+      - test_match_reset_clears_the_billed_set_alongside_the_estimator_reset (0 assertIn, but its
+        `src.index(...)` lookups are equally source-text-dependent -- a source-ORDER claim between two
+        reset lines that is only meaningful in the real match-reset control flow).
+    Same convention as the pre-existing PlayTrackerWiring.test_play_passes_the_three_filters_env_py_passes
+    above (that test predates this ticket and is not counted in the six)."""
 
     def test_the_flag_reads_like_student_opp_elixir_and_really_defaults_to_False(self):
+        """The CODE default, not whatever icebow/config/config.yaml happens to currently set -- that file
+        is live, owner-editable, and legitimately OUTSIDE this ticket's write set (an owner may turn this
+        exact flag on for a real experiment at any time, which happened mid-session here). `_StubCfg`
+        simulates "key not present" the way `Config.get` behaves for an unset key: it returns the `default`
+        kwarg regardless of section/key, so this proves `cfg.get(...)`'s OWN fallback value, decoupled from
+        the live file's current contents."""
         rhs = _rhs_of("_opp_elixir_v2")
-        cfg = Config.load()                      # config.yaml does not set play.opp_elixir_v2
-        self.assertIs(eval(rhs, {}, {"cfg": cfg, "bool": bool}), False)
+        self.assertIs(eval(rhs, {}, {"cfg": _StubCfg(), "bool": bool}), False)
 
     def test_off_path_construction_actually_builds_v1_not_v2(self):
         ns = {"OpponentElixirEstimator": OpponentElixirEstimator,
@@ -192,6 +222,10 @@ class OppElixirV2Wiring(unittest.TestCase):
                       "the OFF branch must call update() with exactly (my_elixir, dets, now), as before")
 
     def test_on_path_bills_via_the_shared_tracker_and_reapplies_the_whitelist(self):
+        # TEXT PIN (3 assertions): tracker reuse, "no second TeamTracker", and whitelist placement are
+        # facts about a multi-statement if/else block, not a single assignment -- there is no free-standing
+        # expression to extract and eval() the way `_rhs_of` does for a one-line assignment; see the class
+        # docstring.
         src = _src()
         self.assertIn('_opp_elixir_v2_bill(_team_tracker, _opp_bill)', src,
                       "must reuse play.py's own _team_tracker, not build a second one")
@@ -234,6 +268,24 @@ class OppElixirV2Wiring(unittest.TestCase):
         guarded_on_v2 = any("_opp_elixir_v2" in ast.dump(t) for t in v.enclosing_tests)
         self.assertFalse(guarded_on_v2,
                          "record_my_play must not be gated behind opp_elixir_v2 -- it must fire in both modes")
+
+
+class BilledDetImmutabilityTests(unittest.TestCase):
+    """O19 attempt 3 FIX 4 (verifier, factual): attempt 1/2 called `_BilledDet` "immutable" while it was a
+    plain `__slots__` class -- the verifier reassigned a field on one and it silently succeeded. Now a
+    `@dataclass(frozen=True, slots=True)`: this proves the reassignment the verifier did now actually
+    raises, rather than just re-asserting the words in a docstring."""
+
+    def test_reassigning_a_field_raises(self):
+        import dataclasses
+        d = play._BilledDet("giant", 0.5, 0.25, "enemy")
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            d.base = "knight"
+        self.assertEqual(d.base, "giant", "the failed assignment must not have partially applied")
+
+    def test_construction_still_works_positionally_and_by_default(self):
+        d = play._BilledDet("giant", 0.5, 0.25)
+        self.assertEqual((d.base, d.cx, d.gy, d.team), ("giant", 0.5, 0.25, "enemy"))
 
 
 class OppElixirV2Billing(unittest.TestCase):
@@ -325,6 +377,24 @@ def _confirmed_tracker(base="giant", hits=2):
     return tk
 
 
+def _confirmed_tracker_multi(specs):
+    """specs: an ORDERED list of (base, x, y, hits) -- built into tk._tracks in that exact order, so a test
+    can assert bill_confirmed preserves it (order matters: it is what V2's own clustering iterates)."""
+    tk = TeamTracker()
+    now = time.time()
+    tk._tracks = [{"team": "enemy", "t": now, "t0": now - 1.0, "x": x, "y": y,
+                  "x0": x, "y0": y, "hits": hits, "base": base, "bm": 0, "be": 0, "rank": 0}
+                 for base, x, y, hits in specs]
+    return tk
+
+
+def _names_in(expr_src: str) -> set:
+    """Every bare Name referenced anywhere inside an expression's AST -- used to prove a value provably
+    does NOT depend on a given name (e.g. the shadow estimator), not just that one specific text string
+    happens not to mention it."""
+    return {n.id for n in ast.walk(ast.parse(expr_src, mode="eval")) if isinstance(n, ast.Name)}
+
+
 class PerceptionBillConfirmedLockTests(unittest.TestCase):
     """O19 attempt 2 FIX 1 (verifier, MEDIUM): PerceptionLoop.bill_confirmed must run the WHOLE billing
     scan inside its own lock (the same lock its _run() thread holds while mutating the tracker's track
@@ -354,14 +424,21 @@ class PerceptionBillConfirmedLockTests(unittest.TestCase):
         self.assertFalse(loop._lock.locked(),
                          "the estimator's update() runs after this returns and must not run while locked")
 
-    def test_bill_confirmed_agrees_with_the_unlocked_helper_on_the_same_tracker(self):
-        tk = _confirmed_tracker()
+    def test_bill_confirmed_matches_the_unlocked_helper_in_full_order_on_three_tracks(self):
+        """(O19 attempt 3 FIX 2, verifier) a single track can only prove (base, team) survive the lock --
+        it cannot catch a coordinate swap or a reordering between tracks, and ORDER matters downstream
+        (opponent_elixir.OpponentElixirEstimatorV2._cluster_new consumes its input by popping from the end,
+        so a scrambled order changes which points get clustered together). Three distinct tracks, the full
+        (base, cx, gy, team) tuple, and the exact sequence -- matching the verifier's own probe."""
+        specs = [("giant", 0.20, 0.25, 2), ("musketeer", 0.55, 0.30, 2), ("knight", 0.80, 0.22, 2)]
+        tk = _confirmed_tracker_multi(specs)
         loop = PerceptionLoop(_Cfg(), None, tk, conf=0.5)
-        locked_out = loop.bill_confirmed(_bill_state())
-        unlocked_out = play._opp_elixir_v2_bill(tk, _bill_state())
-        self.assertEqual(len(locked_out), 1)
-        self.assertEqual((locked_out[0].base, locked_out[0].team),
-                         (unlocked_out[0].base, unlocked_out[0].team))
+        locked_seq = [(d.base, d.cx, d.gy, d.team) for d in loop.bill_confirmed(_bill_state())]
+        unlocked_seq = [(d.base, d.cx, d.gy, d.team) for d in play._opp_elixir_v2_bill(tk, _bill_state())]
+        expect = [(base, x, y, "enemy") for base, x, y, _hits in specs]
+        self.assertEqual(locked_seq, expect)
+        self.assertEqual(unlocked_seq, expect)
+        self.assertEqual(locked_seq, unlocked_seq)
 
     def test_a_one_hit_track_is_not_billed_through_the_passthrough_either(self):
         loop = PerceptionLoop(_Cfg(), None, _confirmed_tracker(hits=1), conf=0.5)
@@ -377,13 +454,21 @@ class PerceptionBillConfirmedLockTests(unittest.TestCase):
 class OppElixirV2ShadowWiring(unittest.TestCase):
     """O19 attempt 2 FIX 2: play.opp_elixir_v2_shadow is OBSERVE-ONLY -- it must be able to compute V2
     beside whichever estimator actually drives mem[5]/S1, but must never itself be able to reach either.
-    Same play()-cannot-be-called caveat as OppElixirV2Wiring above; the driving/print-format logic that
-    also lives inside the same `if _opp_elixir_v2_shadow:` block is left a TEXT PIN for that reason."""
+    Same play()-cannot-be-called caveat as OppElixirV2Wiring above; the "mem[5]/S1 never read the shadow"
+    claim is proven PROVABLY (AST, see test_est_/test_mem5_/test_oe_ below), not by grepping one line, per
+    O19 attempt 3 FIX 2.
+
+    O19 attempt 3 FIX 3 (verifier, accuracy): this class carries TWO literal `assertIn` checks against raw
+    source text (one each in the two tests below labelled TEXT PIN at their point of use), each a fact about
+    a multi-statement block (the shadow reset's `if _opp_elx_shadow is not None:` guard; the shared billing
+    guard `if _opp_elixir_v2 or _opp_elixir_v2_shadow:`) with no single free-standing expression to eval()."""
 
     def test_the_shadow_flag_defaults_off(self):
+        # CODE default via _StubCfg, not the live config.yaml -- see _StubCfg's docstring (that file just
+        # started setting play.opp_elixir_v2 itself for a real experiment mid-session; this flag is not
+        # immune from the same happening to it).
         rhs = _rhs_of("_opp_elixir_v2_shadow")
-        cfg = Config.load()                      # config.yaml does not set play.opp_elixir_v2_shadow
-        self.assertIs(eval(rhs, {}, {"cfg": cfg, "bool": bool}), False)
+        self.assertIs(eval(rhs, {}, {"cfg": _StubCfg(), "bool": bool}), False)
 
     def test_shadow_construction_is_always_the_class_OTHER_than_opp_elx(self):
         ns = {"OpponentElixirEstimator": OpponentElixirEstimator,
@@ -396,12 +481,44 @@ class OppElixirV2ShadowWiring(unittest.TestCase):
         ns["_opp_elixir_v2_shadow"] = False
         self.assertIsNone(eval(rhs, {}, ns), "no shadow object unless the shadow flag is on")
 
-    def test_mem5_and_s1_lines_never_mention_the_shadow_estimator(self):
-        src = _src()
-        mem5_line = src.splitlines()[src[:src.index("mem[5] = _est")].count("\n")]
-        self.assertNotIn("shadow", mem5_line.lower())
-        oe_rhs = _rhs_of("_oe")
-        self.assertNotIn("shadow", oe_rhs.lower())
+    def test_est_is_assigned_only_from_opp_elx_never_the_shadow(self):
+        """(O19 attempt 3 FIX 2, verifier) PROVABLE, not a text grep on one line: a text check on
+        `mem[5] = _est` would still pass if `_est` itself were secretly reassigned from the shadow
+        estimator somewhere else in the function (e.g. `_est = _shadow_est` under some condition) -- that
+        line's TEXT never changes either way. Instead: find EVERY assignment to the name `_est` anywhere in
+        play.py's AST and assert each one's right-hand side references `_opp_elx` (the selected estimator)
+        and does NOT reference `_opp_elx_shadow`/`_shadow_est` anywhere in its own expression tree."""
+        tree = ast.parse(_src())
+        assigns = [n.value for n in ast.walk(tree)
+                  if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == "_est" for t in n.targets)]
+        self.assertEqual(len(assigns), 2, "expected exactly the OFF-branch and ON-branch assignments")
+        for rhs in assigns:
+            names = {n.id for n in ast.walk(rhs) if isinstance(n, ast.Name)}
+            self.assertIn("_opp_elx", names)
+            self.assertNotIn("_opp_elx_shadow", names)
+            self.assertNotIn("_shadow_est", names)
+
+    def test_mem5_is_assigned_only_from_est_never_the_shadow(self):
+        """Same provable style for mem[5]'s own assignment: its RHS must reference `_est` and must not
+        reference the shadow estimator or its value anywhere in the expression."""
+        tree = ast.parse(_src())
+        mem5 = [n.value for n in ast.walk(tree)
+               if isinstance(n, ast.Assign) and len(n.targets) == 1
+               and isinstance(n.targets[0], ast.Subscript)
+               and isinstance(n.targets[0].value, ast.Name) and n.targets[0].value.id == "mem"]
+        self.assertEqual(len(mem5), 1, "expected exactly one assignment to mem[5]")
+        names = {n.id for n in ast.walk(mem5[0]) if isinstance(n, ast.Name)}
+        self.assertIn("_est", names)
+        self.assertNotIn("_opp_elx_shadow", names)
+        self.assertNotIn("_shadow_est", names)
+
+    def test_oe_is_derived_only_from_opp_elx_never_the_shadow(self):
+        """Same provable style for the S1-facing `_oe` value: eval()-able expression, AST-checked rather
+        than string-checked."""
+        names = _names_in(_rhs_of("_oe"))
+        self.assertIn("_opp_elx", names)
+        self.assertNotIn("_opp_elx_shadow", names)
 
     def test_shadow_estimator_is_reset_alongside_the_primary_one(self):
         # TEXT PIN (source ordering, same reasoning as OppElixirV2Wiring's own reset-ordering test).
@@ -413,10 +530,86 @@ class OppElixirV2ShadowWiring(unittest.TestCase):
         self.assertLess(j - i, 200)
 
     def test_billing_input_is_shared_by_v2_and_shadow_v2(self):
-        """When either flag needs billed dets, both use the SAME `_opp_elixir_v2_bill(_team_tracker,
-        _opp_bill)` call -- one scan feeds both estimators, not a second independent tracker walk."""
+        """TEXT PIN: when either flag needs billed dets, both use the SAME `_opp_elixir_v2_bill(_team_tracker,
+        _opp_bill)` call -- one scan feeds both estimators, not a second independent tracker walk. This is a
+        fact about which multi-statement block a later call sits inside, not a single expression; see the
+        class docstring."""
         src = _src()
         self.assertIn('if _opp_elixir_v2 or _opp_elixir_v2_shadow:', src)
+
+
+class _ShadowLogVisitor(ast.NodeVisitor):
+    """Locates the two nested `if` blocks the shadow log depends on: the OUTER `if _opp_elixir_v2_shadow:`
+    (everything that runs once per decision while shadow mode is on) and the INNER throttle gate (the
+    `if now - _shadow_log["last_t"] >= _opp_elixir_v2_shadow_log_every_s:` that gates the print alone)."""
+
+    def __init__(self):
+        self.outer_if = None
+        self.throttle_if = None
+
+    def visit_If(self, node):
+        if isinstance(node.test, ast.Name) and node.test.id == "_opp_elixir_v2_shadow":
+            self.outer_if = node
+        if "_opp_elixir_v2_shadow_log_every_s" in ast.dump(node.test):
+            self.throttle_if = node
+        self.generic_visit(node)
+
+
+class OppElixirV2ShadowLogThrottle(unittest.TestCase):
+    """O19 attempt 3 FIX 1 (verifier, the one that matters for a real session): the shadow log was an
+    unthrottled `print` on every decision. Structural (AST) checks, since this logic has no free-standing
+    expression or importable function to call directly -- same play()-cannot-be-called caveat as the other
+    classes in this file."""
+
+    def test_the_interval_constant_reads_like_a_neighbouring_cadence_and_defaults_to_10s(self):
+        # CODE default via _StubCfg, not the live config.yaml -- see _StubCfg's docstring.
+        rhs = _rhs_of("_opp_elixir_v2_shadow_log_every_s")
+        self.assertEqual(eval(rhs, {}, {"cfg": _StubCfg(), "float": float}), 10.0)
+
+    def test_the_accumulation_runs_on_every_decision_but_the_print_is_gated(self):
+        tree = ast.parse(_src())
+        v = _ShadowLogVisitor()
+        v.visit(tree)
+        self.assertIsNotNone(v.outer_if, "expected an `if _opp_elixir_v2_shadow:` block")
+        self.assertIsNotNone(v.throttle_if, "expected an if-gate comparing against the log-interval constant")
+        throttle_descendant_ids = {id(n) for n in ast.walk(v.throttle_if)}
+        accum = [s for s in v.outer_if.body
+                if isinstance(s, ast.AugAssign) and isinstance(s.target, ast.Subscript)
+                and isinstance(s.target.value, ast.Name) and s.target.value.id == "_shadow_log"]
+        self.assertEqual(len(accum), 2, "expected sum_abs_diff and n to both accumulate")
+        for stmt in accum:
+            self.assertNotIn(id(stmt), throttle_descendant_ids,
+                             "accumulation must run on EVERY decision, not just on a print tick")
+        prints = [n for n in ast.walk(v.throttle_if)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "print"]
+        self.assertEqual(len(prints), 1, "expected exactly one print(), and it must be inside the gate")
+        self.assertNotIn(id(prints[0]), {id(n) for n in ast.walk(v.outer_if)
+                                         if n is not v.throttle_if and isinstance(n, ast.If)},
+                         "the print must not ALSO sit under some other, un-throttled if")
+
+    def test_last_t_is_only_advanced_inside_the_throttle_gate(self):
+        """If `last_t` could be updated OUTSIDE the gate, the throttle would never actually fire twice."""
+        tree = ast.parse(_src())
+        v = _ShadowLogVisitor()
+        v.visit(tree)
+        assigns_to_last_t = [n for n in ast.walk(v.outer_if)
+                             if isinstance(n, ast.Assign) and len(n.targets) == 1
+                             and isinstance(n.targets[0], ast.Subscript)
+                             and isinstance(n.targets[0].value, ast.Name)
+                             and n.targets[0].value.id == "_shadow_log"
+                             and isinstance(n.targets[0].slice, ast.Constant)
+                             and n.targets[0].slice.value == "last_t"]
+        self.assertEqual(len(assigns_to_last_t), 1)
+        throttle_ids = {id(n) for n in ast.walk(v.throttle_if)}
+        self.assertIn(id(assigns_to_last_t[0]), throttle_ids)
+
+    def test_shadow_log_state_is_reset_alongside_the_billed_set(self):
+        # TEXT PIN (source ordering, same reasoning as the other reset-ordering tests in this file).
+        src = _src()
+        i = src.index('_opp_bill["billed"].clear()')
+        j = src.index("_shadow_log.update(")
+        self.assertLess(i, j)
+        self.assertLess(j - i, 120)
 
 
 if __name__ == "__main__":

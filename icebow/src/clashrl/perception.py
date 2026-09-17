@@ -17,20 +17,32 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 
 
+@dataclass(frozen=True, slots=True)
 class _BilledDet:
     """Minimal (.base, .cx, .gy, .team) shim -- everything OpponentElixirEstimator[V2].update() reads off a
     detection -- built from a TeamTracker track's own fields. See _opp_elixir_v2_bill below (O19).
 
     Lives here, not in play.py, so PerceptionLoop.bill_confirmed can run the whole scan under its own
     lock without play.py importing back into this module (play.py already imports PerceptionLoop from
-    here; the reverse would be circular). play.py imports both names from this module instead."""
-    __slots__ = ("base", "cx", "gy", "team")
+    here; the reverse would be circular). play.py imports both names from this module instead.
 
-    def __init__(self, base: str, cx: float, gy: float, team: str = "enemy"):
-        self.base, self.cx, self.gy, self.team = base, cx, gy, team
+    O19 attempt 3 FIX 4 (verifier, factual correction): a plain `__slots__` class (attempt 1/2's shape) is
+    NOT immutable -- an attribute can still be reassigned after construction, which the verifier
+    demonstrated by doing exactly that. `frozen=True` makes that reassignment raise `FrozenInstanceError`,
+    so "immutable" is now literally true rather than aspirational. What was ALREADY true before this fix,
+    and remains the more load-bearing property for `bill_confirmed`'s own correctness (the lock only needs
+    to protect the SCAN, not every later read), is NON-ALIASING: each field is built from `str()`/`float()`
+    at construction (`_opp_elixir_v2_bill` below), copying the value rather than sharing the tracker's own
+    dict/list, so nothing the perception thread does to `tracker._tracks` afterward can reach back into an
+    already-returned `_BilledDet` either way -- frozen or not."""
+    base: str
+    cx: float
+    gy: float
+    team: str = "enemy"
 
 
 def _opp_elixir_v2_bill(tracker, bill_state: dict) -> list:
