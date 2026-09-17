@@ -1288,6 +1288,19 @@ env:
 
 # --- Running the trained policy live -------------------------------------
 play:
+  opp_elixir_v2: true          # L67bp (owner 2026-09-17): use OpponentElixirEstimatorV2 (V2.1 rules) and bill it ONCE
+                               # per TeamTracker-CONFIRMED track instead of per raw detection. Measured over 100 engine
+                               # ghosts (5cs.99 BF): V1 raw-det MAE 5.77 and pinned <=1 elixir on 90% of ticks; this
+                               # design 2.68 (memoryless noise) to 3.46-3.88 (correlated). ALSO changes mem[5], which
+                               # feeds the old CNN (policy_rl.pt exists, so it is loaded) -- that path is UNTESTED.
+                               # Revert: delete this line.
+  student_opp_elixir: true     # L67f/L67bo (owner 2026-09-17): let the S1 student SEE the estimate (obs opp_elixir +
+                               # opp_known). Measured on v6lat_s0, 100 held-out ghosts: 0.52 with nothing fed -> 0.70
+                               # with this estimate (CI 0.61-0.79) -> 0.68 with the engine's TRUE value; 21 matches
+                               # flipped to a win vs 3 away. NOT yet measured on v6aug_s1 (trained on degraded rows
+                               # where opp_elixir is None, so a number is out-of-distribution for it), and the 0.70 has
+                               # NOT yet replicated on a disjoint slice. Was turned OFF earlier because V1's estimate
+                               # suppressed the gate up to 3.2x. Revert: delete this line.
   stall_seconds: 8             # L67ap (owner 2026-09-12): S1 student anti-stall fires after this many seconds without an
                                # accepted play while elixir >= stall_elixir (9). Code default 12.0. v6aug live paused
                                # 35-49% of match time in >10 s pauses vs v6lat's 27% (HANDOFF 5cs.99 AU/AV); this caps
@@ -1425,7 +1438,7 @@ overlay_replay:
 # window must never cover the game: by default it sits just RIGHT of the capture region. Closing
 # the window turns it off for the session.
 preview:
-  enabled: false
+  enabled: true
   scale: 0.5          # window size as a fraction of the captured frame
   fps: 30             # refresher-thread frame rate: LIVE frames redrawn with the newest detections
                       # (boxes still update at the act cadence ~1.5s = what the policy actually sees)
