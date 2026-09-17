@@ -20,6 +20,74 @@ from collections import deque
 from typing import Optional
 
 
+class _BilledDet:
+    """Minimal (.base, .cx, .gy, .team) shim -- everything OpponentElixirEstimator[V2].update() reads off a
+    detection -- built from a TeamTracker track's own fields. See _opp_elixir_v2_bill below (O19).
+
+    Lives here, not in play.py, so PerceptionLoop.bill_confirmed can run the whole scan under its own
+    lock without play.py importing back into this module (play.py already imports PerceptionLoop from
+    here; the reverse would be circular). play.py imports both names from this module instead."""
+    __slots__ = ("base", "cx", "gy", "team")
+
+    def __init__(self, base: str, cx: float, gy: float, team: str = "enemy"):
+        self.base, self.cx, self.gy, self.team = base, cx, gy, team
+
+
+def _opp_elixir_v2_bill(tracker, bill_state: dict) -> list:
+    """O19 (play.opp_elixir_v2, default OFF): mirror pipeline/opp_est_audit.tt_bill_dets -- bill ONE
+    _BilledDet per TeamTracker track the FIRST time it reaches ``tracker.min_hits`` confirmed sightings as
+    an 'enemy' verdict, instead of feeding the estimator every raw per-frame detection (what the OFF path
+    still does). Takes `tracker`/`bill_state` as plain arguments rather than closing over play()'s locals --
+    same shape as tt_bill_dets(tracker, dets, t, billed_ids).
+
+    A per-track monotonic uid (`tr["_o19_bill_uid"]`, stamped on every LIVE track so a later verdict flip to
+    'enemy' still finds it) keyed into `bill_state["billed"]` means a track is billed at most once for its
+    life, while a track that later expires (dropped from `tracker._tracks` by its own forget_s) and is later
+    recreated at the same spot is a brand-new dict with no stamp yet, so it CAN be billed again -- exactly
+    tt_bill_dets's documented behaviour (pipeline/opp_est_audit.py:963-976), reused here rather than
+    re-derived; keying on id(dict) was that module's OWN measured mistake (CPython address recycling, its
+    O16 FIX 1), so this does not repeat it either.
+
+    Does NOT call ``tracker.tag()`` itself -- play.py's own `_threat_extra` already ensures `tracker` is
+    current before calling this, one of two ways: SYNCHRONOUSLY (`tracker.tag(dets_all, time.time())`,
+    called directly by the act loop) when no perception thread is running or its last snapshot is stale;
+    or, when a `PerceptionLoop` owns `tracker`, via that loop's OWN background `_run()` calls to
+    `self._tracker.tag(...)` at ~perception_hz -- in which case the snapshot the act loop is working from
+    (`PerceptionLoop.snapshot()`) may be UP TO `perception_hz`'s own staleness ceiling old (play.py treats
+    anything <= 2.0s as "fresh" and skips its own synchronous tag call in that case), same latency every
+    other perception-thread-fed consumer in play.py already tolerates -- not a new gap this function opens.
+    Calling `tracker.tag()` a second time here would tag the same frame/pass twice either way.
+
+    THREADING (O19 attempt 2 FIX 1): when `tracker` is being mutated concurrently by a running
+    PerceptionLoop (`_run()` holds `self._lock` while it calls `tracker.tag()` and reassigns
+    `tr["x"]/["y"]/["t"]` in place -- see that method below), a caller MUST run this function under that
+    SAME lock (``PerceptionLoop.bill_confirmed`` does exactly that). Reading a track's fields one at a time
+    without the lock can observe a torn write (e.g. this thread's new `x` paired with the previous pass's
+    `y`), which then feeds the estimator's own proximity/clustering tests a point that never actually
+    existed on screen. When the tracker is NOT shared with a running perception thread (no detector, or
+    perception disabled -- play.py's own single-threaded act loop is the only writer), there is no
+    concurrent mutator and calling this function directly, unlocked, is safe -- exactly like every other
+    unlocked read of `_team_tracker` in that branch of play.py's own code (`dets`, `ident`, `mem`, ...).
+
+    `bill_state` is ``{"uid_counter": itertools.count(1), "billed": set()}``. Only "billed" is cleared at a
+    match boundary (mirrors _opp_elx.reset()) -- the uid counter itself is never reset, matching
+    tt_bill_dets's "kept one per (match, tracker)" billed-set semantics (a fresh match's tracks are fresh
+    dicts regardless of the counter's running value).
+    """
+    out: list = []
+    for tr in tracker._tracks:
+        if "_o19_bill_uid" not in tr:
+            tr["_o19_bill_uid"] = next(bill_state["uid_counter"])
+        if tr.get("team") != "enemy" or int(tr.get("hits", 0)) < tracker.min_hits:
+            continue
+        uid = tr["_o19_bill_uid"]
+        if uid in bill_state["billed"]:
+            continue
+        bill_state["billed"].add(uid)
+        out.append(_BilledDet(str(tr.get("base") or ""), float(tr["x"]), float(tr["y"])))
+    return out
+
+
 class PerceptionLoop:
     def __init__(self, cfg, detector, tracker, conf: float, hz: float = 10.0,
                  preview=None, cap_factory=None, recorder=None):
@@ -74,6 +142,30 @@ class PerceptionLoop:
     def set_towers(self, mine_alive, enemy_alive) -> None:
         with self._lock:
             self._tracker.set_towers(mine_alive, enemy_alive)
+
+    def bill_confirmed(self, bill_state: dict, whitelist=None) -> list:
+        """O19 attempt 2 FIX 1: lock-guarded passthrough for _opp_elixir_v2_bill, matching the
+        record_play/set_towers/snapshot/enemy_tracks passthroughs above -- this thread's own _run() loop
+        mutates the SAME tracker's track dicts in place under `self._lock` (this class's own `_run()` calls
+        `self._tracker.tag(dets, now)` inside that lock below, and `TeamTracker.tag` itself then does
+        `tr["x"], tr["y"], tr["t"] = ...`), so a caller reading a track's
+        fields one at a time without the lock can observe a torn write -- this pass's `x` paired with the
+        PREVIOUS pass's `y` -- which then feeds the estimator's own match_radius proximity test a point that
+        never existed on screen (verifier-identified MEDIUM defect, attempt 1).
+
+        The scan (which only reads/copies each track's fields into a fresh, immutable `_BilledDet`) runs
+        ENTIRELY inside the lock, so every value in the returned list is a private copy by the time this
+        returns -- nothing this thread does afterward can mutate what the caller now holds. The estimator's
+        own `update()` call must NOT run while holding this lock (it can be arbitrarily slower than one
+        perception pass); this method only takes the snapshot, then releases before returning. Whitelist
+        filtering is a plain string check on those copies and does not need the lock either, so it is
+        applied after release, same relative place `filter_whitelisted_billed_dets` sits in
+        pipeline/opp_est_audit.py (on the tracker's OUTPUT, not on what feeds `tag()`)."""
+        with self._lock:
+            billed = _opp_elixir_v2_bill(self._tracker, bill_state)
+        if whitelist is not None:
+            billed = [d for d in billed if d.base in whitelist]
+        return billed
 
     def enemy_tracks(self, now: float, with_base: bool = False, max_age=None):
         # `with_base` is part of the CONTRACT of this passthrough, not an optional extra: the

@@ -7,6 +7,7 @@ fine-tuning, the same loop plays toward the tower/crown/win rewards.
 """
 from __future__ import annotations
 
+import itertools
 import math
 import random
 import signal
@@ -39,9 +40,15 @@ from . import card_threat
 from .cycle import CycleTracker
 from .tower_hp import TowerHpTracker
 from .vision import Vision
-from .opponent_elixir import OpponentElixirEstimator
+from .opponent_elixir import OpponentElixirEstimator, OpponentElixirEstimatorV2
 from .detect_obs import (canvas_enabled, canvas_stack_dt, channels_to_uint8, detection_channels,
                          CanvasStack, N_CHANNELS)
+# O19 attempt 2 FIX 1: _BilledDet/_opp_elixir_v2_bill now live in .perception (a lightweight, stdlib-only
+# module play.py already imports PerceptionLoop from), so PerceptionLoop.bill_confirmed can run the WHOLE
+# scan under its own lock without a play.py<->perception.py import cycle. Re-exported here at module level
+# (not just inside play()) so this stays directly importable/testable exactly as before -- `play._BilledDet`
+# and `play._opp_elixir_v2_bill` still resolve, now as aliases of the .perception originals.
+from .perception import _BilledDet, _opp_elixir_v2_bill
 
 
 def _pick_device(cfg):
@@ -184,6 +191,16 @@ def play(cfg) -> None:
     _student = None
     _student_ckpt = cfg.get("play", "student_ckpt", default=None)
     _student_opp_elixir = bool(cfg.get("play", "student_opp_elixir", default=False))   # L67g: see below
+    # O19: which estimator COMPUTES the number (V2 + TeamTracker-confirmed billing vs V1 + raw dets).
+    # Independent of _student_opp_elixir above (whether the number REACHES S1 at all). Default OFF --
+    # unset, behaviour is byte-identical to before this ticket. See _opp_elixir_v2_bill above.
+    _opp_elixir_v2 = bool(cfg.get("play", "opp_elixir_v2", default=False))
+    # O19 attempt 2 FIX 2: OBSERVE-ONLY twin of the flag above (default OFF; live-path matrix in the O19
+    # progress file). Computes V2 beside whichever estimator is actually driving mem[5]/S1 and logs the
+    # agreement, WITHOUT ever feeding V2's number to mem[5] or S1 itself -- that still comes from
+    # `opp_elixir_v2` alone. If BOTH this and `opp_elixir_v2` are on, `opp_elixir_v2` wins the drive seat
+    # (unchanged meaning) and the shadow log becomes "V1 (now the non-driving side) vs V2 (driving)".
+    _opp_elixir_v2_shadow = bool(cfg.get("play", "opp_elixir_v2_shadow", default=False))
     # L67u F3 (LOGGING ONLY, owner 2026-09-11): wall-clock stamps on every [student] line, and the tray re-read after
     # each student tap, so the overlay clips can be aligned and a repeated tap told apart -- the card still in its
     # slot (the tap did not deploy) vs a different card that slid in (HANDOFF 5cs.99 Z). No decision reads these.
@@ -397,7 +414,18 @@ def play(cfg) -> None:
         print("[play] hero: detections on the ability button are dropped while it shows (L67ag D1)", flush=True)
     _ident_state = {"depth": 0.0, "t": None}   # deepest-threat depth + time, for the approach velocity
     _opp_mem = card_threat.OpponentMemory(_db)  # per-match opponent short-term memory (Stage 3)
-    _opp_elx = OpponentElixirEstimator(_db)     # live estimate from mirrored spend accounting
+    # O19: play.opp_elixir_v2 (default OFF) swaps in OpponentElixirEstimatorV2, billed once per
+    # TeamTracker-confirmed track (see _opp_elixir_v2_bill) instead of every raw per-frame detection --
+    # measured (offline, HANDOFF 5cs.99 BF) MAE 2.68-3.88 vs V1's 5.77. OFF keeps the original V1 object,
+    # constructed exactly as before this ticket.
+    _opp_elx = OpponentElixirEstimatorV2(_db) if _opp_elixir_v2 else OpponentElixirEstimator(_db)
+    # O19 attempt 2 FIX 2: the shadow estimator is ALWAYS the OTHER class from `_opp_elx` above, so its log
+    # line is a genuine V1-vs-V2 comparison no matter which flag is driving. None (never constructed, never
+    # updated) unless play.opp_elixir_v2_shadow is set -- no extra cost at all when it is off.
+    _opp_elx_shadow = ((OpponentElixirEstimator(_db) if _opp_elixir_v2 else OpponentElixirEstimatorV2(_db))
+                       if _opp_elixir_v2_shadow else None)
+    _opp_bill = {"uid_counter": itertools.count(1), "billed": set()}   # O19: per-track billing state; used
+    # whenever opp_elixir_v2 or opp_elixir_v2_shadow is True (see the update() call site and match-reset).
     # SIM/LIVE PARITY of opponent-memory slot 5 (HANDOFF 5cr.8, owner ruling 23:4x): the sim wrote OUR elixir into this
     # slot during training (sim/env.py mem[5] = eng.elixir[0]/10) while live wrote the opponent-elixir ESTIMATE (mean
     # 0.035 in a live session) -- the trained gate read "no elixir" and waited. Same switch as train-rl's env:
@@ -555,7 +583,41 @@ def play(cfg) -> None:
                                                     dt=dt, horizon=predict_horizon)
         _ident_state["depth"] = float(ident[7]); _ident_state["t"] = now
         mem = _opp_mem.update([(d.base, d.gy) for d in dets], dt=dt)          # memory: BOTH halves (incl. staging)
-        _est = _opp_elx.update(float(my_elixir), dets, now)                   # normalized opponent-elixir estimate
+        # O19 attempt 2 FIX 1 (verifier, MEDIUM): _team_tracker's track dicts are mutated IN PLACE by the
+        # perception thread's own tag() call under its lock (TeamTracker.tag, replay_mine.py --
+        # `trk["x"], trk["y"], trk["t"] = ...`) whenever `_ploop` is running. Reading those fields here
+        # without that SAME lock could observe a torn write (this pass's x paired with the PREVIOUS pass's
+        # y), which then feeds the estimator's own match_radius proximity/clustering test a point that never
+        # existed on screen. So: when perception owns the tracker, go through its locked passthrough
+        # (`bill_confirmed`, matching every other `if _ploop is not None and _ploop.running:`-guarded access
+        # to `_team_tracker`/`_ploop` elsewhere in this function -- record_play, enemy_tracks, reset_tracker,
+        # etc.); only when NOTHING else can be mutating `_team_tracker` concurrently (no perception thread --
+        # this act loop is then the tracker's only reader/writer, exactly like the unlocked `dets`/`ident`/
+        # `mem` reads directly above) is the direct, unlocked call safe.
+        if _opp_elixir_v2 or _opp_elixir_v2_shadow:
+            if _ploop is not None and _ploop.running:
+                _billed = _ploop.bill_confirmed(_opp_bill, detector_cards)
+            else:
+                _billed = [d for d in _opp_elixir_v2_bill(_team_tracker, _opp_bill) if d.base in detector_cards]
+        if _opp_elixir_v2:
+            _est = _opp_elx.update(float(my_elixir), _billed, now)            # V2, tracker-billed -- DRIVES mem[5]/S1
+        else:
+            _est = _opp_elx.update(float(my_elixir), dets, now)               # V1, normalized opponent-elixir estimate
+        # O19 attempt 2 FIX 2: play.opp_elixir_v2_shadow (default OFF) is OBSERVE-ONLY. `_opp_elx_shadow` is
+        # ALWAYS the class OTHER than whichever `_opp_elx` actually is (constructed at :~460), so this is a
+        # genuine V1-vs-V2 comparison regardless of which flag drives mem[5]/S1 -- never a comparison of V2
+        # against itself when both flags happen to be on. Neither `mem[5]` nor S1 ever read `_shadow_est`;
+        # it exists purely for this log line, at the EXISTING per-frame [play] cadence (no new sink).
+        if _opp_elixir_v2_shadow:
+            if _opp_elixir_v2:
+                _shadow_est = _opp_elx_shadow.update(float(my_elixir), dets, now)   # shadow = V1, raw dets
+                _v1_val, _v2_val = _shadow_est, _est
+            else:
+                _shadow_est = _opp_elx_shadow.update(float(my_elixir), _billed, now)  # shadow = V2, billed dets
+                _v1_val, _v2_val = _est, _shadow_est
+            print(f"[play] opp_elixir_v2_shadow V1={_v1_val * 10.0:.2f} V2={_v2_val * 10.0:.2f} "
+                  f"diff={(_v2_val - _v1_val) * 10.0:+.2f} driving={'V2' if _opp_elixir_v2 else 'V1'} "
+                  f"wall={_wall()}", flush=True)
         mem[5] = _est if _mem5_source == "opp_estimate" else float(my_elixir) / 10.0
         blocks = []
         if want_identity:
@@ -1194,6 +1256,9 @@ def play(cfg) -> None:
                     clock.reset()                 # zero the 2x/3x elixir clock at match start
                     _opp_mem.reset()              # forget the previous opponent's deck/archetype
                     _opp_elx.reset(my_elixir=float(vision.read_elixir(frame)), now=time.time())
+                    if _opp_elx_shadow is not None:
+                        _opp_elx_shadow.reset(my_elixir=float(vision.read_elixir(frame)), now=time.time())
+                    _opp_bill["billed"].clear()   # O19: last match's billed uids must not block this match
                     if _student is not None:
                         _student.reset_match()    # L67i: play history must not cross a match boundary
                     if _ploop is not None and _ploop.running:
