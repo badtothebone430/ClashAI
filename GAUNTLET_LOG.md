@@ -1876,3 +1876,9 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **Not fixable on raw dets (a):** knight 65 plays -> 1,289 charges under B. Design change: bill on NEW TeamTracker track IDs (min_hits=2), measurable as B_tt; caveat: i.i.d. degrade makes B_tt optimistic where B is pessimistic -> needs a temporally correlated degrade variant.
 - **Step 3 (a, live, 8084aad):** unanchored NON-deck zones -> enemy (old side-prior tagged enemy poison on my tower as 'mine'); deck-owned zones unchanged (guard). Whitelist prepared, moot while student_opp_elixir=False.
 - **Live status:** estimator OFF live; +16/+26 unrealised. **Next (b):** V2.1 rules (~40 min); B_tt + correlated degrade; only then wire live + v7.
+
+## L67bn (2026-09-17, paused overnight) -- V2.1 + tracker-input + correlated-noise run PREPARED, blocked on the emulator
+- **Committed bce44bb:** V2.1 (R4-R7, 4 verified attempts), harness --tracker/--corr (12 conditions), chain_opp_est_v21.ps1 (smoke arm + guard, then 0:100).
+- **Boot failed 01:06Z:** attempt 1 exit=1 after 2.5 min, attempts 2-6 exit=1 within ~5 s each. crosvm (Google Play Games) running; every successful boot today had crosvm=0 -> hypervisor contention (b). Owner's processes untouched; nine guarded re-checks held.
+- **Owner 2026-09-17 ~01:5xZ:** going to bed, will close the emulator in the morning; loop paused on request.
+- **Resume:** when crosvm=0 and >= 5 GB free: `Start-Process powershell -File scratchpad\gauntlet\L67\e1\chain_opp_est_v21.ps1` (~8 min boot + 2-match smoke + ~1 h). Then: fidelity gate vs ctrl_live100, score conditions A/A_wl/B/B_tt/B_tt_wl/B_corr{S,L}{,_tt,_tt_wl}, HANDOFF section BF, Discord.
