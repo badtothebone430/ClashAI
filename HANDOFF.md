@@ -3549,6 +3549,39 @@ Both tau 0.24 runs pause more than the tau 0.27 run (22:48 run by video: 44% vs 
 *The decisive next experiment (b, not started).* This instrument can answer the only question that matters. `e1_eval --noise-off opp_elixir` supplies TRUE opponent elixir and measured **+16 / +26 winrate**. Add a mode that supplies the ESTIMATOR's value instead (V2.1 fed by tracker-confirmed dets, i.e. `B_tt_wl` quality, MAE ~2.7) and re-run the arm on both slices. That converts "MAE 2.7" into "recovers X of the +16" and is the precondition for v7: if a 2.7-MAE estimate recovers most of the effect, wire it live and train v7 on that error; if it recovers none, the whole opponent-elixir line closes with a measured negative and the 40-point gap must be attacked elsewhere. Cost ~1.5 h engine. Secondary, cheaper: the whitelist/spell coverage gap (A_wl's -34.5%) is now worth more than any further estimator rule.
 
 
+**BG. L67bo-bs -- THE DECISIVE EXPERIMENT: a ~2.6-MAE opponent-elixir ESTIMATE recovers the FULL effect of the engine's true value, replicated on 200 distinct held-out opponents with all four gates reproducing record-for-record.** Owner-approved 2026-09-17 ("run that... implemented into live play as soon as possible"). Chain `chain_opp_feed.ps1` (pid 58096, 22:47Z -> 2026-09-18 00:25Z), `pipeline.opp_est_audit --feed-opp-elixir`, v6lat_s0, tau 0.27, live rule. Instrument built by O18 (verifier PASS_WITH_NOTES; causality proven with a real estimator, `true` mode token-identical to e1_eval's `--noise-off opp_elixir` route). Commits ab76edb (instrument), this section's commit (results).
+
+*Gates -- all four reproduce their reference run record-for-record on outcome/crowns/plays_accepted (a).*
+
+| gate | reference | result |
+|---|---|---|
+| `gate_off10` (0:10, feed off) | `ctrl_live100` | identical, 5 wins |
+| `gate_true10` (0:10, feed true) | `off_opp_elixir` | identical, 7 wins |
+| `gate_off10_s2` (100:110, feed off) | `ctrl_slice2` | identical, 4 wins |
+| `gate_true10_s2` (100:110, feed true) | `off_opp_elixir_slice2` | identical, 6 wins |
+
+Both endpoints of the effect are therefore reproduced on BOTH slices before any estimate is fed: the measurement sits between two verified anchors, not against carried-forward numbers.
+
+*Results (a, n=100 per cell).*
+
+| slice | control (nothing fed) | **ESTIMATE fed** | truth fed | est vs control |
+|---|---|---|---|---|
+| 0:100 | 0.52 | **0.70** (CI 0.61-0.79) | 0.68 | **+18** |
+| **100:200** | **0.47** | **0.73** (CI 0.64-0.82) | **0.73** | **+26** |
+
+*Paired flips (a).* Slice 1 vs control: **21 to win / 3 away** / 76 unchanged. Slice 2 vs control: **28 to win / 2 away** / 70 unchanged. **Combined: 49 matches flipped to a win against 5 flipped away across 200 distinct opponents.** Against the TRUTH arms the flips are symmetric (12/10 and 12/12), i.e. the estimate and the engine's exact value produce the same winrate by different individual matches -- the estimate is not beating truth, it is matching it.
+
+*Closed-loop estimator accuracy (a).* Slice 1 MAE 2.660 bias -0.497; slice 2 MAE **2.595** bias **+0.027** (essentially unbiased). Open-loop it measured 2.68 (BF), so feeding the estimate back into the policy -- which changes the plays, which changes `record_my_play`, which changes the estimate -- did NOT destabilise it. Total |plays_accepted| difference vs control on slice 1: 1,192, so the policy genuinely acts on the number rather than ignoring it.
+
+*Robustness to estimator quality (a).* Sensitivity arm `feed_estL_s1`: the policy was fed a deliberately WORSE estimate (long-correlated noise, MAE 3.222 bias -2.273) and still returned **0.67** (CI 0.58-0.76) vs the 0.52 control. So ~0.55 elixir of extra MAE costs ~3pp, inside the intervals: the effect holds across the whole measured 2.6-3.2 accuracy band, not only at the optimistic end. (Sensitivity arm, not a paired-per-tick comparison -- trajectories diverge once the injected values differ, V18 finding 4.)
+
+***The strategic caveat, stated as plainly as the headline.*** All of the above is **v6lat_s0** -- the checkpoint every anchor in this chain uses, and NOT the one deployed live. Live runs **v6aug_s1**, which measured **0.74** alone on these same 0:100 ghosts (5cs.99 AT). So the estimate lifts v6lat (0.52 -> 0.70) to roughly where v6aug already sits unaided; it is **not shown to improve the deployed checkpoint**. The mechanism explains why the transfer is not automatic: v6lat trained on CLEAN rows WITH exact `opp_elixir`, so live's `None` (opp_known=0) is the out-of-distribution case for it and an estimate moves it BACK toward training. v6aug trained on DEGRADED rows where `degrade()` sets `opp_elixir=None` (obs_contract.py:557), so for v6aug an estimate is the OOD direction. **"No retraining needed" is true of v6lat only** -- a correction to my own earlier phrasing, made after the owner challenged it.
+
+*What this does NOT establish.* v6aug + estimate (queued: `chain_opp_feed_v6aug.ps1`, gate vs `e2_v6aug_s1_tau027` + 100 estimated matches, ~30 min, held for the owner). Live transfer at all: engine ghosts under the live rule, not real play. The `mem[5]` path -- enabling `opp_elixir_v2` also changes the opponent-memory slot that feeds the old CNN (policy_rl.pt is present, so it is loaded), and the engine harness has no CNN, so that path is untested in either direction. Single checkpoint, single tau (0.27), single seed. Whether the live estimator's noise resembles the memoryless or correlated model (BF: unmeasured).
+
+*Live state (a).* Owner enabled `play.opp_elixir_v2: true` (config.yaml:1291) and `play.student_opp_elixir: true` (:1297) for a live trial; both verified through the real `Config` loader. Code defaults remain False; deleting the two lines is a complete revert with no code change. The wiring itself is committed (b814f5a, d72179e) with the billing scan under the perception lock. NOTE: enabling those flags broke three committed tests that read the live config to assert the defaults -- my error, repaired in d72179e by testing the code default through a stub.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
