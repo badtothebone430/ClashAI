@@ -8,6 +8,7 @@ fine-tuning, the same loop plays toward the tower/crown/win rewards.
 from __future__ import annotations
 
 import itertools
+import json
 import math
 import random
 import signal
@@ -1293,6 +1294,10 @@ def play(cfg) -> None:
     prev = None
     last_act = 0.0
     prev_mult = 1
+    # L67cb LIVE OUTCOME LEDGER: this project has never recorded a single live match result, so no
+    # live winrate has ever existed. One JSONL row per match, alongside the session log.
+    _ledger = log_path.with_name(log_path.name.replace("play_", "live_matches_")).with_suffix(".jsonl")
+    _match = {"t0": 0.0, "n": 0, "w": 0, "l": 0, "d": 0}
     while running["v"]:
         try:
             frame = capture.grab()
@@ -1325,6 +1330,7 @@ def play(cfg) -> None:
                     _hero.update(t=None, xy=None, press=None)   # L67ag H3: hero state is per match
                     _canvas_stack.reset()         # ...and last match's canvas motion history
                     _replay_rec.new_match()       # arm a fresh overlay-replay clip for this match
+                    _match["t0"] = time.time()    # L67cb: match start, for the outcome ledger
                     prev_mult = 1
                 elif prev == GameState.IN_MATCH:
                     # L67g: CLOSE the clip when the match ends. play.py armed clips (new_match) but never
@@ -1332,6 +1338,47 @@ def play(cfg) -> None:
                     # -- env.py (train-rl) has always called this and that is why its overlays were written
                     # per match. Any non-IN_MATCH read (MATCH_END / HOME / UNKNOWN past the grace hold) ends it.
                     _replay_rec.end_match()
+                    # L67cb LIVE OUTCOME LEDGER. The owner's bar is a live winrate and this project has
+                    # never recorded one live match result -- vision.py has no results-screen reader (its
+                    # line 11 is a NOTE, not an implementation). So read the outcome from the IN-MATCH
+                    # destruction latch: TowerTracker.crown_counts() (reward.py:722), plus
+                    # king_trending_down() (reward.py:737), which exists precisely because a king fall
+                    # ends the match instantly and its latch often cannot finish before the frame cuts to
+                    # the results screen -- without it 3-crown wins are systematically under-read.
+                    # Crowns decide a Clash Royale match (equal crowns = draw), so this gives win/loss/draw.
+                    # SAFE HERE: tower_tracker.reset() runs at match START (see the IN_MATCH branch above),
+                    # so the latches still hold THIS match when we read them.
+                    # try/except: a ledger line must NEVER be able to kill the live loop.
+                    try:
+                        _blue, _red, _ek, _mk = tower_tracker.crown_counts()
+                        _tek, _tmk = tower_tracker.king_trending_down()
+                        if _ek or _tek:
+                            _blue = 3
+                        if _mk or _tmk:
+                            _red = 3
+                        _res = "win" if _blue > _red else ("loss" if _red > _blue else "draw")
+                        _secs = (time.time() - _match["t0"]) if _match["t0"] else None
+                        _match["n"] += 1
+                        _match[{"win": "w", "loss": "l", "draw": "d"}[_res]] += 1
+                        with open(_ledger, "a", encoding="utf-8") as fh:
+                            fh.write(json.dumps({
+                                "n": _match["n"],
+                                "t_end": datetime.now().isoformat(timespec="seconds"),
+                                "seconds": round(_secs, 1) if _secs else None,
+                                "outcome": _res,
+                                "crowns_for": _blue,
+                                "crowns_against": _red,
+                                "king_latched": [bool(_ek), bool(_mk)],
+                                "king_trending": [bool(_tek), bool(_tmk)],
+                                "overtime_hint": bool(getattr(clock, "overtime", False)),
+                                "ckpt": Path(_student_ckpt).name if _student_ckpt else None,
+                                "tau": getattr(_student, "gate_tau", None),
+                            }) + "\n")
+                        log(f"[match] {_res.upper()} {_blue}-{_red} "
+                            f"{(f'{_secs:.0f}s' if _secs else '?')} | session "
+                            f"{_match['w']}W-{_match['l']}L-{_match['d']}D of {_match['n']}")
+                    except Exception as exc:  # noqa: BLE001 -- the ledger must never kill the live loop
+                        log(f"[match] ledger FAILED: {exc}")
                 prev = state
 
             if state == GameState.IN_MATCH:
