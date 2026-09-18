@@ -325,6 +325,10 @@ def play(cfg) -> None:
     # L67ae X2: once an enemy princess is down, an X-Bow goes to that tower's POCKET (reward.xbow_pocket_cell); the lane
     # sticks for the rest of the match. play.xbow_pocket_after_tower false restores X1's always-defensive X-Bow.
     _xbow_pocket_on = bool(cfg.get("play", "xbow_pocket_after_tower", default=True))
+    # L67bz: run the dead-lane rule at ANY depth, not just forward of xbow_forward_board_y. The
+    # owner has reported dead-lane bows three times (2026-08-16, 2026-09-18 x2); the rule existed
+    # the whole time but was gated behind the offensive cut, and the model's bows sit behind it.
+    _xbow_dead_lane_any_depth = bool(cfg.get("play", "xbow_dead_lane_any_depth", default=True))
     _xbow_pocket_y = float(cfg.get("play", "xbow_pocket_board_y", default=0.391))
     _xbow_pocket = {"side": None}
     tesla_ids = {i for i, key in enumerate(vision.deck_keys)
@@ -1099,7 +1103,11 @@ def play(cfg) -> None:
             _ehp = ([float(v) for v in _raw]
                     if len(_raw) == 2 and all(v is not None for v in _raw) else None)
             lane = xbow_target_lane_cell(cx, cy, tower_tracker.enemy_a, _ehp,
-                                         tower_tracker.enemy_alive, xbow_live_defense_y, actions)
+                                         tower_tracker.enemy_alive, xbow_live_defense_y, actions,
+                                         dead_lane_any_depth=_xbow_dead_lane_any_depth)
+            if lane is not None and lane != cell:
+                print(f"[assist] XBOW dead-lane cell {cell}->{lane} "
+                      f"enemy_alive {[int(b) for b in tower_tracker.enemy_alive][:2]} wall={_wall()}", flush=True)
             if lane is not None:
                 cell = lane
                 gx, gy = cell % gw, cell // gw

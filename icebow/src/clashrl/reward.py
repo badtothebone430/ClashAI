@@ -418,7 +418,7 @@ def tornado_pullable(tracks, kind_of):
 
 
 def xbow_target_lane_cell(cx, cy, enemy_anchors, enemy_hp, enemy_alive, defense_y, acts,
-                          hp_margin=0.10):
+                          hp_margin=0.10, dead_lane_any_depth=False):
     """Put an OFFENSIVE X-Bow in the lane whose tower is worth shooting at.
 
     Reported from live overtime (user, 2026-08-16), one tower down each side: the model placed a
@@ -440,20 +440,37 @@ def xbow_target_lane_cell(cx, cy, enemy_anchors, enemy_hp, enemy_alive, defense_
 
     Keeps the bow's DEPTH row -- the caller's depth assist owns that. Returns a new cell, or None
     to leave the placement alone (defensive bow, no anchors, or already the right lane).
+
+    ``dead_lane_any_depth`` (L67bz, owner-reported a THIRD time 2026-09-18): run RULE 1 at any
+    depth instead of only forward of ``defense_y``. This whole function was written for the owner's
+    2026-08-16 report, but it gated every rule behind ``cy >= defense_y`` on the assumption that a
+    dead-lane bow is an OFFENSIVE one. It is not: the model's bows sit at board y 0.61, which is
+    BEHIND the 0.58 cut, so the gate returned None before rule 1 could ever run -- the dead-lane
+    rule has never once fired on a bow the model actually plays, which is why two rounds of
+    "fixes" changed nothing. An X-Bow reaches a tower from your own half (siege range ~11.5 tiles),
+    so its LANE matters whatever its depth. Default False reproduces the old behaviour exactly, so
+    env.py's positional call -- and therefore training -- is untouched. RULE 2 (concentrate on the
+    weaker tower) stays offensive-only: it is an attacking preference, not a correctness fix, and
+    chasing HP could pull a genuinely defensive bow away from the lane it was placed to defend.
     """
     princesses = enemy_anchors[:2] if enemy_anchors else []
-    if len(princesses) < 2 or cy >= defense_y:
-        return None                                   # defensive bow: it is not aiming at a tower
+    if len(princesses) < 2:
+        return None
     alive = list(enemy_alive or [True, True])[:2]
     while len(alive) < 2:
         alive.append(True)
     aimed = 0 if abs(princesses[0][0] - cx) <= abs(princesses[1][0] - cx) else 1
     other = 1 - aimed
 
-    if not alive[aimed]:
-        if not alive[other]:
-            return None                               # both down: the king is all that is left
+    # RULE 1 first, so it can run at any depth when the caller opts in. A destroyed tower cannot be
+    # chipped from ANY row, so this is a correctness fix, not a preference.
+    if not alive[aimed] and alive[other] and (dead_lane_any_depth or cy < defense_y):
         return acts.cell_at(princesses[other][0], cy)  # rule 1: shoot something that exists
+
+    if cy >= defense_y:
+        return None                                   # defensive bow: rule 2 has no opinion on it
+    if not alive[aimed]:
+        return None                                   # both down: the king is all that is left
     if not alive[other]:
         return None                                   # already on the only live tower
 

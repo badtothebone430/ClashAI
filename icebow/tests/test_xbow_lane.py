@@ -98,6 +98,79 @@ class XbowLaneTests(unittest.TestCase):
                 self.assertEqual(got // gw, self.acts.cell_at(0.745, cy) // gw)
 
 
+class XbowDeadLaneAnyDepthTests(unittest.TestCase):
+    """L67bz: the owner reported dead-lane bows a THIRD time (2026-08-16, then twice on 2026-09-18),
+    after two rounds of "fixes" that changed nothing. Cause: rule 1 ("never bow a dead lane") sat
+    behind `cy >= defense_y`, and every bow the model actually plays sits at board y 0.61 -- BEHIND
+    that cut. So the rule returned None before it could ever run. `dead_lane_any_depth=True` runs
+    rule 1 at any depth; rule 2 (weaker tower) stays offensive-only on purpose.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.acts = ActionSpace(Config.load())
+
+    def _lane_of(self, cell):
+        gw = int(self.acts.gw)
+        cx, _ = self.acts.cell_center(cell % gw, cell // gw)
+        return "left" if abs(cx - LEFT[0]) < abs(cx - RIGHT[0]) else "right"
+
+    def _call(self, cx, cy, alive, hp=(FULL, FULL), any_depth=True):
+        return xbow_target_lane_cell(cx, cy, ANCHORS, list(hp) if hp else None, list(alive),
+                                     DEFENSE_Y, self.acts, dead_lane_any_depth=any_depth)
+
+    # -- the precondition: this is exactly what was broken -----------------------------
+    def test_PRECONDITION_the_old_default_leaves_a_defensive_dead_lane_bow_alone(self):
+        """Without the flag the bug reproduces: a DEFENSIVE bow in the dead left lane is untouched.
+        If this ever starts returning a cell, the fix below is no longer testing anything."""
+        self.assertIsNone(self._call(cx=0.25, cy=0.60, alive=(False, True), any_depth=False))
+
+    def test_a_DEFENSIVE_bow_in_the_dead_lane_now_moves_to_the_live_lane(self):
+        got = self._call(cx=0.25, cy=0.60, alive=(False, True))
+        self.assertIsNotNone(got, "the owner's exact complaint: bows kept going to the dead lane")
+        self.assertEqual(self._lane_of(got), "right")
+
+    def test_the_mirror_case_dead_right_moves_left(self):
+        got = self._call(cx=0.745, cy=0.60, alive=(True, False))
+        self.assertIsNotNone(got)
+        self.assertEqual(self._lane_of(got), "left")
+
+    def test_a_defensive_bow_already_on_the_live_lane_is_left_alone(self):
+        self.assertIsNone(self._call(cx=0.745, cy=0.60, alive=(False, True)))
+
+    def test_both_towers_down_leaves_it_alone_and_never_aims_at_the_king(self):
+        self.assertIsNone(self._call(cx=0.25, cy=0.60, alive=(False, False)))
+
+    def test_it_works_without_any_hp_reading(self):
+        """The live HP digit read fails often; a correctness rule must not depend on it."""
+        got = self._call(cx=0.25, cy=0.60, alive=(False, True), hp=None)
+        self.assertEqual(self._lane_of(got), "right")
+
+    def test_the_depth_row_is_still_preserved(self):
+        gw = int(self.acts.gw)
+        for cy in (0.55, 0.60, 0.65):
+            with self.subTest(cy=cy):
+                got = self._call(cx=0.25, cy=cy, alive=(False, True))
+                self.assertEqual(got // gw, self.acts.cell_at(0.745, cy) // gw)
+
+    # -- scope: rule 2 must NOT leak to defensive bows ---------------------------------
+    def test_the_weaker_tower_rule_does_NOT_apply_to_a_defensive_bow(self):
+        """Rule 2 is an attacking preference. Chasing HP could drag a defensive bow off the lane
+        it was placed to defend, so the flag must not enable it."""
+        self.assertIsNone(self._call(cx=0.25, cy=0.60, alive=(True, True), hp=(FULL, FULL * 0.4)))
+
+    # -- regression: offensive behaviour is unchanged ----------------------------------
+    def test_offensive_behaviour_is_identical_with_and_without_the_flag(self):
+        for cx, cy, alive, hp in ((0.25, 0.50, (False, True), (FULL, FULL)),
+                                  (0.745, 0.50, (False, True), (FULL, FULL)),
+                                  (0.25, 0.50, (True, True), (FULL, FULL * 0.5)),
+                                  (0.25, 0.50, (True, True), (FULL, FULL * 0.96)),
+                                  (0.25, 0.50, (False, False), (FULL, FULL))):
+            with self.subTest(cx=cx, alive=alive, hp=hp):
+                self.assertEqual(self._call(cx, cy, alive, hp, any_depth=True),
+                                 self._call(cx, cy, alive, hp, any_depth=False))
+
+
 class XbowLockDeadLaneTests(unittest.TestCase):
     """O22: play.py:1101-1109 runs xbow_target_lane_cell (moves off a dead lane) and THEN
     xbow_lock_cell (snaps to the NEARER princess, no aliveness check at all) unconditionally.

@@ -1376,6 +1376,12 @@ play:
                                  # L67ae X2, why it was on: once an enemy princess is down, an X-Bow goes to that tower's
                                  # POCKET (pros: 25% forward after a tower falls vs 5-8% before, 76% in the dead lane).
   xbow_pocket_board_y: 0.391     # L67ae X2: pocket depth (pro median for forward X-Bows in a dead tower's lane)
+  xbow_dead_lane_any_depth: true # L67bz: apply "never bow a DEAD lane" at ANY depth, not only forward of
+                                 # xbow_forward_board_y. The rule (reward.xbow_target_lane_cell rule 1) existed
+                                 # since the owner's 2026-08-16 report but was gated behind the OFFENSIVE cut,
+                                 # and every bow the model plays sits BEHIND that cut -- so it never once fired.
+                                 # A bow reaches a tower from your own half (siege ~11.5 tiles), so lane matters
+                                 # at any depth. false = pre-L67bz behaviour. REVERT: set to false.
 
 # --- Hero Ice Wizard ability: Frosty Fella (L67ag, owner rulings 2026-09-12; HANDOFF 5cs.99 AL/AM) ---
 # The ability is NOT a model action: play.py presses it by rule (clashrl/hero_ability.py). Stats (level 15): 2 elixir,
