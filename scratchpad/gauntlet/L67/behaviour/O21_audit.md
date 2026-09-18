@@ -28,7 +28,10 @@ disk is 2026-09-12, so none of this covers the play the owner just watched.
   a low-HP princess" can be neither confirmed nor refuted from this data.
 
 ## C. Overtime / X-Bow (owner: barely defensive X-Bows; shoves cards at the bridge in OT)
-- (a) run20: 4 x_bow / 90 plays = **4.4%**, ALL at board y > 0.5 (own half, i.e. defensive):
+> **WRONG — RETRACTED. See the LEAD ADDENDUM at the end of this file.** The classification below used
+> a y > 0.5 threshold I invented; the code's own boundary is 0.58, and against it all 30 X-Bows were
+> OFFENSIVE, not defensive. Do not cite this section.
+- (a, RETRACTED) run20: 4 x_bow / 90 plays = **4.4%**, ALL at board y > 0.5 (own half, i.e. defensive):
   (0.14, 0.61) left and (0.75, 0.61) right. **Zero offensive X-Bows.**
 - (b) Bridge concentration is consistent with the placement cluster but NOT quantified against the
   single-elixir mix; **overtime is not marked in the logs**, so OT-only plays cannot be filtered.
@@ -66,3 +69,50 @@ Why the assists do not fire; whether the owner's overtime observations reproduce
 tower-HP-conditioned behaviour (not logged); anything about tonight's session (unrecorded).
 
 STATUS: complete (lead transcription + follow-up)
+
+## LEAD ADDENDUM 2026-09-18 — corrections and two decisive measurements
+
+### RETRACTION: the X-Bow offensive/defensive split (owner-corrected)
+I reported "4.4% of plays, ALL defensive, zero offensive" using a y > 0.5 rule I invented. The code
+defines the boundary itself: `play.xbow_forward_board_y: 0.58` (config.yaml:1369 — "the live X-Bow
+assists treat a bow as OFFENSIVE only forward of this BOARD depth"). Re-measured against 0.58:
+
+| run | X-Bows | board y | verdict |
+|---|---|---|---|
+| run20 | 6 | all 0.61 | all FORWARD of 0.58 = offensive |
+| run18 | 11 | all 0.61 | all offensive |
+| run12b | 13 | all 0.61 | all offensive |
+
+**30/30 offensive, zero defensive.** The owner ("literally every xbow the model played was
+offensive") was right; my metric was wrong. X-Bow is exactly the card where own-half != defensive —
+siege range ~11.5 tiles means the standard offensive placement sits behind the river on your own side.
+
+### Overtime forwardness (owner item 3) — NOT SUPPORTED on available data
+Only run12b reached overtime (12 non-X-Bow plays past t=180s; run18 never did, run20 had one).
+Median board-y: **0.550 regular vs 0.550 overtime**; enemy-half placements 10% vs 17% (a two-play
+difference). (c) not supported — but n=12, and run12b is a week-old v6aug run at a different tau
+than the session the owner actually watched. Treat as UNTESTED, not refuted. Tonight's session was
+not recorded; the newest on disk is 2026-09-12.
+
+### Rocket: NOT gated, simply not chosen (a) — decides that this needs training, not a live fix
+Counted decisions where rocket was in the tap hand AND elixir >= 6, versus rockets actually played:
+
+| run | opportunities | rockets played | rate |
+|---|---|---|---|
+| run20 | 39 | 1 | 2.6% |
+| run18 | 37 | 1 | 2.7% |
+| run12b | 52 | 2 | 3.8% |
+
+**128 opportunities, 4 rockets, under 3%.** Nothing filters or blocks it — the affordability mask and
+the gate are not the cause. The model simply does not select rocket. That is card selection, which
+imitation training determines, so it is NOT fixable on the live path and NOT fixable overnight. It
+also explains the absent rocket+tornado combo without a separate theory: a two-card combo cannot
+appear when one half is played once per match.
+
+### The one live-path defect worth fixing tonight
+play.py:1101-1109 runs `xbow_target_lane_cell` (the anti-dead-lane fix, reward.py:420, written after
+the owner's 2026-08-16 report of this exact behaviour) and then runs `xbow_lock_cell`
+UNCONDITIONALLY. That function takes `enemy_anchors[:2]` with no aliveness argument and snaps to the
+NEARER princess — so the dead-lane correction can be overwritten two lines later by a function that
+does not know the tower is dead. Ticket O22 dispatched to fix it with a backwards-compatible
+`enemy_alive=None` parameter so the training sim (env.py, which shares reward.py) stays unchanged.
