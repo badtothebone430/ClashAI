@@ -1945,3 +1945,14 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - Command delivered: `--student data\pipeline\s1_icebow_v6aug_s1.pt --student-gate-tau 0.27`, opp-elixir flags already on (1291/1297).
 - hogeq left ON (no X-Bow in that deck, assist inert).
 - **NOT established:** any live effect of either change -- that is what the overnight run is for. The cause of forward-overtime play is still unknown, but is now auditable for the first time.
+
+
+## L67bz (2026-09-18) -- THE dead-lane bug: the rule was gated behind a cut every real bow sits behind
+- Owner, third report (first 2026-08-16): *"it kept putting xbows in the dead left lane. your fix did nothing."* **He is right.**
+- **(a) CAUSE, exact line.** `reward.xbow_target_lane_cell` rule 1 IS "never bow a dead lane", but line 445 gated every rule behind `cy >= defense_y: return None`. Model's bows sit at board y 0.61 -> frame 0.5064 vs the cut's 0.4890, i.e. BEHIND it. **The rule has never once fired on a bow the model actually plays.**
+- **(a) Explains both failed fixes.** 11c6e2f filtered `xbow_lock_cell`'s candidates at lines 487-491; that function returns None at line **492** for these bows -- it filtered a list discarded on the next line. And the L67by pocket flip removed the only assist still moving them, which is why it got WORSE overnight.
+- **(a) FIX:** `dead_lane_any_depth=False` param; True runs rule 1 at ANY depth (a bow reaches a tower from your own half, siege ~11.5 tiles). Rule 2 stays offensive-only on purpose. **Default False = byte-identical old behaviour, so env.py/TRAINING untouched.** Live flag `play.xbow_dead_lane_any_depth` (default true). REVERT: set false.
+- Added `[assist] XBOW dead-lane cell X->Y enemy_alive [..]` so the next run PROVES it fires. Two of my last three claims here were wrong; a log line beats another confident argument.
+- **(c) RETRACTION, <1 day old:** I called the pocket assist "near-inert -- 2 firings in 19 runs" and predicted no visible change. **Wrong denominator:** the feature landed 2026-09-12 (563e4dc), so only run18/run20 could fire it; run18 fired on **2 of 11 bows (~18%)**. Lesson: the denominator is runs that HAD the feature.
+- Tests: 26 pass incl. a PRECONDITION test that the old default leaves a defensive dead-lane bow untouched, the owner's exact case, mirror case, both-down (never the king), no-HP, depth preserved, rule-2 scope, and offensive-behaviour-identical regression.
+- **NOT established:** that it works LIVE (unit-tested + reasoned, not observed). hogeq has the identical defect, untouched.
