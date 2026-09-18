@@ -1956,3 +1956,13 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - **(c) RETRACTION, <1 day old:** I called the pocket assist "near-inert -- 2 firings in 19 runs" and predicted no visible change. **Wrong denominator:** the feature landed 2026-09-12 (563e4dc), so only run18/run20 could fire it; run18 fired on **2 of 11 bows (~18%)**. Lesson: the denominator is runs that HAD the feature.
 - Tests: 26 pass incl. a PRECONDITION test that the old default leaves a defensive dead-lane bow untouched, the owner's exact case, mirror case, both-down (never the king), no-HP, depth preserved, rule-2 scope, and offensive-behaviour-identical regression.
 - **NOT established:** that it works LIVE (unit-tested + reasoned, not observed). hogeq has the identical defect, untouched.
+
+
+## L67ca (2026-09-18) -- THE structural finding: the model plays every X-Bow exactly where the assist layer switches off
+- **(a)** X-Bow is the ONLY degenerate card: entropy **0.62-1.97 bits** (2-5 unique cells) vs 2.5-4.25 bits for the_log / skeletons / ice_wizard / tornado. run12b put **84.6% of its 13 bows in ONE cell**. The policy is not broken in general -- every other card varies with the board.
+- **(a)** Its cells decode to **254 = board x 0.139 LEFT, y 0.604** and **267 = x 0.861 RIGHT, y 0.604**: a binary lane pick at ONE fixed depth, side-biased per run.
+- **(a) THE POINT: 0.604 sits behind the 0.58 cut**, which was deliberately tuned so the pro row counts DEFENSIVE. All three assists return None for `cy >= defense_y`. **The entire X-Bow assist layer has been inert BY CONSTRUCTION for every bow.** Confirmed: `[assist] XBOW lane` = **0 across all 19 runs**.
+- **(c) RETRACTION of my framing:** not three defects (11c6e2f lock, L67bz gate, L67by pocket) but ONE -- the policy emits into a region the assist layer defines as out of scope. I patched assists repeatedly without ever checking whether any could fire; that is a one-grep measurement I never ran until tonight.
+- The owner's "it kept putting xbows in the dead left lane" is the **exact predicted behaviour** of this system.
+- L67bz is the first mechanism that can move a bow by tower state at 0.604. Unit-tested, instrumented, **NOT live-verified**.
+- **NOT established:** why the policy is degenerate on this card (likely imitation data); whether raising the cut would be better (would re-enable the run15 bridge-shove regression); **live winrate -- never measured once in this project.**

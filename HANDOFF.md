@@ -3685,6 +3685,33 @@ Both endpoints of the effect are therefore reproduced on BOTH slices before any 
 *What this does NOT establish.* That the fix works **live** -- it is verified by 26 unit tests and by reasoning about play.py's sequence (lane moves the cell; `xbow_lock_cell` and `xbow_offense_depth_cell` both return None at this depth, so neither can undo it), **not** by live observation. Whether the owner's bows are in the dead lane because of placement at all, as opposed to the model choosing that cell for reasons the assists then fail to correct. Whether the pocket should go back on (owner ruled it off; the dead-lane fix now serves his stated doctrine better than the pocket did). hogeq carries the identical defect, untouched.
 
 
+**BM. L67ca -- THE STRUCTURAL FINDING BEHIND MONTHS OF FAILED X-BOW FIXES: the model plays every X-Bow at one fixed depth, and that depth is exactly where the entire X-Bow assist layer switches itself off.** Measured from the three recent live logs after the owner said he was closing the project. This is ONE finding, not the three separate assist bugs I have been reporting.
+
+***1. The X-Bow is the ONLY degenerate card in the deck (a).*** Placement entropy per card, across run20 / run18 / run12b:
+
+| card | unique cells | entropy (bits) |
+|---|---|---|
+| the_log | 12 / 19 / 22 | 3.50 / 3.92 / 4.25 |
+| skeletons | 9 / 16 / 17 | 2.78 / 3.72 / 3.74 |
+| ice_wizard | 7 / 20 / 13 | 2.50 / 4.21 / 3.04 |
+| tornado | 9 / 12 / 18 | 3.17 / 3.27 / 4.00 |
+| **x_bow** | **3 / 5 / 2** | **1.25 / 1.97 / 0.62** |
+
+**The policy is NOT broken in general** -- every other card shows real situational spread (3-4 bits). The X-Bow, the deck's win condition, is a near-constant: in run12b it played **84.6% of its 13 bows into a single cell**, with 2 unique cells total.
+
+***2. Those cells are a binary lane pick at ONE fixed depth (a).*** Decoded: cell **254 = board x 0.139 (LEFT), y 0.604**; cell **267 = board x 0.861 (RIGHT), y 0.604**. Same row, mirrored columns. run20 and run18 sat mostly on LEFT (254), run12b 84.6% on RIGHT (267). The model picks a side, largely sticks to it for the run, and **never varies the depth at all**.
+
+***3. And 0.604 is precisely where every X-Bow assist turns itself off (a). This is the whole story.*** `xbow_forward_board_y` is **0.58**, deliberately tuned so the pro row 0.604-0.609 counts as DEFENSIVE (`test_xbow_live_depth.py:62-66`). The model plays **exclusively** at 0.604. All three assists -- `xbow_target_lane_cell` (reward.py:445), `xbow_lock_cell` (492), `xbow_offense_depth_cell` (539) -- return `None` for `cy >= defense_y`. **Therefore the entire X-Bow assist layer has been inert by construction, for every bow, since the cut was introduced.** Empirical confirmation: `[assist] XBOW lane` appears **0 times across all 19 recorded runs**.
+
+***RETRACTION of my own framing (c).*** I reported these as separate defects -- a lock ignoring aliveness (11c6e2f), a dead-lane rule gated too tightly (L67bz), a pocket assist to switch off (L67by). **They are one defect: the policy emits placements into a region the assist layer defines as out-of-scope.** The assist layer and the policy were tuned against each other, and I kept patching individual assists without once checking whether ANY of them could fire. The measurement that would have caught it -- count how often each assist actually fires -- is a single grep, and I did not run it until tonight.
+
+*Why this makes the owner's complaint inevitable (a).* The model cannot vary its X-Bow lane by board state (0.62-1.97 bits of entropy), and the only components that could vary it for him were all disabled. A dead enemy tower could never change where a bow went. **"It kept putting xbows in the dead left lane" is the exact predicted behaviour of this system**, not an anomaly.
+
+*What changes it.* L67bz's `dead_lane_any_depth` is the first mechanism in the codebase that can move a bow by tower state at 0.604. Unit-tested and now instrumented (`[assist] XBOW dead-lane`), but **NOT verified live** -- one run settles it.
+
+*What this does NOT establish.* Why the policy is degenerate on this one card (untested; likely the imitation data, since pro X-Bows cluster on that row -- but pros VARY the lane by tower state and this model does not). Whether raising the cut would be better than the L67bz fix -- untested, and it would re-enable the run15 bridge-shove regression (16 of 17 bows to the bridge). Anything about live winrate: **still never measured, not once, in this entire project** -- every number given to the owner has been engine ghosts.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
