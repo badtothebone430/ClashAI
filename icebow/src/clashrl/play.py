@@ -1104,7 +1104,10 @@ def play(cfg) -> None:
                 cell = lane
                 gx, gy = cell % gw, cell // gw
                 cx, cy = actions.cell_center(gx, gy)
-            snapped = xbow_lock_cell(cx, cy, tower_tracker.enemy_a, xbow_range, xbow_live_defense_y, actions)
+            # O22: filter the lock's candidates by aliveness too, so it cannot re-snap the bow
+            # onto a dead lane that xbow_target_lane_cell just moved it off of (see reward.xbow_lock_cell).
+            snapped = xbow_lock_cell(cx, cy, tower_tracker.enemy_a, xbow_range, xbow_live_defense_y, actions,
+                                     enemy_alive=tower_tracker.enemy_alive)
             if snapped is not None:
                 cell = snapped
             # ...then set its DEPTH from the column: behind a bridge it sits a row back (room to

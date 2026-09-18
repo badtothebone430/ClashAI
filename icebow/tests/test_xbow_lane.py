@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from clashrl.actions import ActionSpace                  # noqa: E402
 from clashrl.config import Config                        # noqa: E402
-from clashrl.reward import xbow_target_lane_cell         # noqa: E402
+from clashrl.reward import xbow_target_lane_cell, xbow_lock_cell  # noqa: E402
 
 # left / right enemy princess anchors, mirroring reward._anchors' layout
 LEFT, RIGHT = (0.25, 0.205), (0.745, 0.205)
@@ -96,6 +96,90 @@ class XbowLaneTests(unittest.TestCase):
             with self.subTest(cy=cy):
                 got = self._call(cx=0.25, cy=cy, alive=(False, True))
                 self.assertEqual(got // gw, self.acts.cell_at(0.745, cy) // gw)
+
+
+class XbowLockDeadLaneTests(unittest.TestCase):
+    """O22: play.py:1101-1109 runs xbow_target_lane_cell (moves off a dead lane) and THEN
+    xbow_lock_cell (snaps to the NEARER princess, no aliveness check at all) unconditionally.
+    Two lines later the lock could undo the lane fix by re-snapping onto the nearer-but-dead
+    tower. ``enemy_alive`` on xbow_lock_cell closes that: filter the candidate princesses by
+    aliveness BEFORE picking the nearer one, so a dead lane is never a candidate again.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.acts = ActionSpace(Config.load())
+
+    def _lane_of(self, cell):
+        gw = int(self.acts.gw)
+        cx, _ = self.acts.cell_center(cell % gw, cell // gw)
+        return "left" if abs(cx - LEFT[0]) < abs(cx - RIGHT[0]) else "right"
+
+    def _lock(self, cx, cy=0.50, xbow_range=0.36, alive=None):
+        if alive is None:
+            return xbow_lock_cell(cx, cy, ANCHORS, xbow_range, DEFENSE_Y, self.acts)
+        return xbow_lock_cell(cx, cy, ANCHORS, xbow_range, DEFENSE_Y, self.acts, enemy_alive=alive)
+
+    # -- 1. both alive: the new keyword must not change anything -----------------------
+    def test_both_alive_matches_the_default_None_path_already_in_range(self):
+        """cx on the RIGHT anchor, cy=0.50: distance to RIGHT is hypot(0, 0.295)=0.295 <= 0.36,
+        so both the untouched default path and an explicit alive=(True, True) must leave it (None)."""
+        cx, cy, rng = RIGHT[0], 0.50, 0.36
+        old = self._lock(cx, cy, rng)
+        new = self._lock(cx, cy, rng, alive=(True, True))
+        self.assertIsNone(old)
+        self.assertEqual(old, new)
+
+    def test_both_alive_matches_the_default_None_path_out_of_range(self):
+        """cx=0.50 (midway): RIGHT is hypot(0.245,0.295)=0.3835 away, LEFT is hypot(0.25,0.295)=0.3867
+        -- RIGHT is nearer and both are > 0.36, so both paths must snap to the RIGHT lane."""
+        cx, cy, rng = 0.50, 0.50, 0.36
+        old = self._lock(cx, cy, rng)
+        new = self._lock(cx, cy, rng, alive=(True, True))
+        self.assertIsNotNone(old)
+        self.assertEqual(old, new)
+        self.assertEqual(self._lane_of(old), "right")
+
+    # -- 2. nearer DEAD, farther alive, out of range: must snap to the farther (alive) lane --
+    def test_nearer_dead_farther_alive_snaps_to_the_farther_lane(self):
+        """cx=0.40 (nearer to LEFT): LEFT is hypot(0.15,0.295)=0.331 away, RIGHT is
+        hypot(0.345,0.295)=0.454 away. At range=0.30 BOTH are out of range, so the unfiltered
+        (buggy) default snaps to the nearer one -- LEFT, which is dead. Filtered by
+        alive=(False, True), LEFT is not a candidate at all, so it must snap to RIGHT instead."""
+        cx, cy, rng = 0.40, 0.50, 0.30
+        buggy = self._lock(cx, cy, rng)                       # today's behaviour: ignores aliveness
+        self.assertIsNotNone(buggy)
+        self.assertEqual(self._lane_of(buggy), "left", "precondition: the unfiltered lock picks the dead lane")
+        fixed = self._lock(cx, cy, rng, alive=(False, True))
+        self.assertIsNotNone(fixed)
+        self.assertEqual(self._lane_of(fixed), "right")
+
+    # -- 3. both dead: never redirect toward the king -----------------------------------
+    def test_both_dead_returns_None_never_aims_at_the_king(self):
+        got = self._lock(0.40, 0.50, 0.30, alive=(False, False))
+        self.assertIsNone(got, "no live princess left: leave the model's own cell, never aim at the king")
+
+    # -- 4. the full play.py sequence: lane fix, then lock, must land in the LIVE lane ---
+    def test_the_play_sequence_lane_fix_then_lock_stays_in_the_live_lane(self):
+        """Reproduces play.py:1101-1109 in order: the model aimed at the DEAD left tower,
+        xbow_target_lane_cell moves it to the live right lane, and the (filtered) lock -- forced
+        to re-snap by a deliberately tiny range -- must not undo that move back onto the left lane."""
+        alive = [False, True]
+        gw = int(self.acts.gw)
+        cx, cy = LEFT[0], 0.50                     # model's own placement: dead (left) lane
+        lane = xbow_target_lane_cell(cx, cy, ANCHORS, None, alive, DEFENSE_Y, self.acts)
+        self.assertIsNotNone(lane, "precondition: the dead-lane rule must fire")
+        cell = lane
+        cx, cy = self.acts.cell_center(cell % gw, cell // gw)
+        snapped = xbow_lock_cell(cx, cy, ANCHORS, 0.05, DEFENSE_Y, self.acts, enemy_alive=alive)
+        if snapped is not None:
+            cell = snapped
+        self.assertEqual(self._lane_of(cell), "right", "the lock must not re-snap back onto the dead lane")
+
+    # -- 5. a deep/defensive bow is untouched, exactly as today --------------------------
+    def test_a_DEFENSIVE_bow_still_returns_None_with_alive_passed(self):
+        got = self._lock(LEFT[0], cy=0.60, xbow_range=0.30, alive=(False, True))
+        self.assertIsNone(got)
 
 
 if __name__ == "__main__":

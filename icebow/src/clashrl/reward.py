@@ -466,15 +466,29 @@ def xbow_target_lane_cell(cx, cy, enemy_anchors, enemy_hp, enemy_alive, defense_
     return None
 
 
-def xbow_lock_cell(cx, cy, enemy_anchors, xbow_range, defense_y, acts):
+def xbow_lock_cell(cx, cy, enemy_anchors, xbow_range, defense_y, acts, enemy_alive=None):
     """Snap a FORWARD (offensive) X-Bow that landed OUT of firing range onto the nearer enemy
     princess's LANE so it actually locks the tower. The policy tends to drop the X-Bow at the far
     bridge EDGE (or dead centre) where -- once the deploy clamp holds it on your side of the river --
     it sits just outside ``xbow_range`` and never locks. Keeps the model's depth row, pulls x to the
     nearer tower's lane. Returns a new grid cell, or None (leave it) for a deep/defensive X-Bow
     (cy >= defense_y) or one that already reaches a tower.
+
+    ``enemy_alive`` (O22, live-path dead-lane fix): optional, defaults to None which reproduces
+    today's exact behaviour -- both princesses are candidates and it always snaps to the NEARER
+    one, dead or alive. Passing the live [left, right] aliveness lets a caller that has already
+    corrected the lane (``xbow_target_lane_cell``) keep that correction: dead princesses are
+    dropped from the candidate set BEFORE the nearest-lane pick, so a dead lane can never win the
+    snap. Missing entries pad as alive, matching ``xbow_target_lane_cell``'s convention. If none
+    are alive the candidate set is empty and this returns None -- the model's own cell is left
+    alone; it is NEVER redirected toward the king.
     """
     princesses = enemy_anchors[:2] if enemy_anchors else []
+    if enemy_alive is not None:
+        alive = list(enemy_alive)[:2]
+        while len(alive) < len(princesses):
+            alive.append(True)
+        princesses = [p for p, a in zip(princesses, alive) if a]
     if not princesses or cy >= defense_y:
         return None
     d = min(np.hypot(cx - nx, cy - ny) for nx, ny in princesses)
