@@ -3753,6 +3753,25 @@ Both endpoints of the effect are therefore reproduced on BOTH slices before any 
 *What this does NOT establish.* Any live winrate -- still, after this entire project, never once measured. Whether the crown latch is correct at end-of-match in live conditions beyond the 9 sampled matches. Anything about RL, velocity or the owner's 50%-vs-humans bar.
 
 
+**BP. L67cd -- ROOT CAUSE OF BOTH LOST SESSIONS: `WindowCapture` grabs a SCREEN RECTANGLE, so any window on top of the game is what the bot "sees". Check this before every live run.** Diagnosed 2026-09-18 17:53 after the owner reported the bot "can't even find the battle button".
+
+***The mechanism (a).*** `icebow/src/clashrl/capture.py:43-61` `refresh_region()` resolves the game window's client area to a rectangle `[left, top, width, height]` in physical screen pixels, and `grab()` then captures **that region of the screen** via mss -- not the window's own pixels. **Anything drawn over that rectangle is captured verbatim and fed to the detector as if it were the game.**
+
+***What it actually captured (a).*** `run.py diag` -> `icebow/data/diag_state.png` shows **a browser window displaying the Claude Code conversation**, not Clash Royale. Consequences, all consistent: `detect_state -> UNKNOWN` on every frame (it is a web page); match_end templates score 0.303/0.317 against a 0.80 threshold; the reported "Battle button best-match center = (0.570, 0.866)" is a **spurious template hit on page content**, well away from the configured tap `[0.492, 0.771]`; and nav's escalations -- reward tap `(0.500, 0.550)` and dismiss `(0.645, 0.905)` -- were **synthesising mouse clicks onto the browser** for minutes. The owner's "can't find the battle button" was the bot not looking at the game at all.
+
+***This is the same failure as the antivirus episode (a).*** The "Antivirus protection expired" dialog (BO) that killed 22 relaunch attempts overnight was another window over the same rectangle. **Two lost sessions, one root cause.** It is not a nav bug, a template bug, or a model bug.
+
+*Config is NOT the problem.* `window.title_contains: "Clash Royale"`, `window.region: null` (config.yaml:9-10), so the region auto-detects by title on every refresh. Note the trap for later: if `window.region` is ever pinned, `refresh_region()` short-circuits at `capture.py:44` (`self._explicit`) and a stale rectangle can never self-correct.
+
+*Not fixable from inside the process (a).* `SetForegroundWindow` + `ShowWindow` on the game's own handle were tried and failed -- Windows blocks foreground-stealing from a background process, which is also why `nav`'s force-focus fails. Synthetic input to rearrange windows was declined on judgement (the occluding window showed a purchase control) and, for the security dialog, blocked by the permission classifier.
+
+***THE PRE-FLIGHT CHECK, and it would have saved both sessions.*** Before launching, run `python run.py diag` and confirm the saved `data/diag_state.png` shows **the actual game**. `[diag] detect_state -> UNKNOWN` at the Home screen means the capture is hijacked -- do not launch. The game window must be on top and unobstructed for the whole run; a bot that cannot see the game cannot play, and it will click blindly wherever its escalations aim.
+
+*Matches banked so far (not a winrate).* 11 total across two sessions, same ckpt/tau (`s1_icebow_v6aug_s1.pt`, 0.27): 9 from 01:13-01:40 (3W-6L) and 2 from 17:35-17:42 (1W-1L, both to overtime). `score_live_baseline.py` pools them and reports per-file counts.
+
+*What this does NOT establish.* Any live winrate. Whether the game screen is otherwise healthy -- the only capture on disk is of the browser, so nothing here says the Home screen would be detected correctly once unobstructed.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
