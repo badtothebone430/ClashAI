@@ -36,19 +36,45 @@ def wilson(k, n, z=1.96):
 
 
 def main():
-    ledger = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else newest(REPO / "icebow" / "data", "live_matches_*.jsonl")
-    logf = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else newest(REPO / "scratchpad" / "gauntlet" / "L67", "live_baseline_*.log")
-    if not ledger or not ledger.exists():
+    # POOL EVERY LEDGER FILE. A run that is interrupted and relaunched writes a NEW file, so
+    # scoring "the newest" would silently drop the earlier matches. A wrong denominator is exactly
+    # the failure the integrity check below exists to catch -- do not reintroduce it here.
+    if len(sys.argv) > 1:
+        ledgers = [pathlib.Path(sys.argv[1])]
+    else:
+        ledgers = sorted((REPO / "icebow" / "data").glob("live_matches_*.jsonl"), key=lambda p: p.stat().st_mtime)
+    ledgers = [p for p in ledgers if p.exists()]
+    if not ledgers:
         print("NO LEDGER FOUND -- the run produced no match rows.")
         return 1
 
-    rows = [json.loads(l) for l in ledger.read_text(encoding="utf-8").splitlines() if l.strip()]
+    rows, per_file = [], []
+    for p in ledgers:
+        rs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+        per_file.append((p.name, len(rs)))
+        rows.extend(rs)
+
+    # Pool only rows sharing the SAME (ckpt, tau). Mixing configurations would be two different
+    # experiments reported as one number.
+    cfgs = Counter((r.get("ckpt"), r.get("tau")) for r in rows)
+    if len(cfgs) > 1:
+        keep = cfgs.most_common(1)[0][0]
+        print(f"*** {len(cfgs)} CONFIGURATIONS PRESENT -- scoring only ckpt={keep[0]} tau={keep[1]} ***")
+        for cfg_key, cnt in cfgs.items():
+            print(f"      {cfg_key}  n={cnt}{'   <-- scored' if cfg_key == keep else '   <-- EXCLUDED'}")
+        rows = [r for r in rows if (r.get("ckpt"), r.get("tau")) == keep]
+
+    logfiles = ([pathlib.Path(sys.argv[2])] if len(sys.argv) > 2
+                else sorted((REPO / "scratchpad" / "gauntlet" / "L67").glob("live_baseline_*.log")))
+    logfiles = [p for p in logfiles if p.exists()]
     n = len(rows)
     c = Counter(r["outcome"] for r in rows)
     w, ll, d = c.get("win", 0), c.get("loss", 0), c.get("draw", 0)
     p, lo, hi = wilson(w, n)
 
-    print(f"LEDGER  {ledger.name}   matches={n}")
+    print(f"LEDGER  {len(per_file)} file(s), matches={n}")
+    for fname, cnt in per_file:
+        print(f"    {fname}  {cnt}")
     print(f"  W {w}   L {ll}   D {d}")
     print(f"  WINRATE {p:.1%}   Wilson 95% CI [{lo:.1%}, {hi:.1%}]   (+-{(hi - lo) / 2:.1%})")
 
@@ -76,11 +102,11 @@ def main():
         print(f"  overtime: {sum(1 for r in rows if r.get('overtime_hint'))}")
         print(f"  ckpt {rows[0].get('ckpt')}  tau {rows[0].get('tau')}")
 
-    if not logf or not logf.exists():
+    if not logfiles:
         print("\n(no stdout log -- skipping the integrity check and behaviour counters)")
         return 0
 
-    text = logf.read_text(encoding="utf-8", errors="replace")
+    text = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in logfiles)
     starts = len(re.findall(r"state: IN_MATCH", text))
     print(f"\nINTEGRITY  ledger rows {n}  vs  IN_MATCH transitions {starts}", end="  ")
     print("OK" if abs(starts - n) <= 1 else f"*** MISMATCH -- {abs(starts - n)} matches unaccounted for; DENOMINATOR SUSPECT ***")
