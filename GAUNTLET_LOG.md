@@ -1934,3 +1934,14 @@ Two items queued in §6 for the next PPO run (elixir drift rule; per-card top-ce
 - (a) **...but it fires twice in the whole archive.** All 19 `live_run*_utf8.log`: `[assist] XBOW pocket` = 2, both run18, both one-princess-down with the side matching the dead tower. Every other run 0. **Refutes my own hypothesis** that the pocket explains the owner's forward-overtime play. That cause is still unknown.
 - (a) No crown/damage-lead gate on placement exists anywhere live; only per-tower HP (`reward.py:460-465`).
 - **Owed, highest value and cheap:** record a live session. Three of four complaints and now the overtime cause are all unauditable without one.
+
+
+## L67by (2026-09-18) -- OWNER RULING: pocket assist OFF; every tap now stamps match state
+- Owner decided the BJ conflict: *"the pro derived play clearly does not apply at 10,000 trophies, so go with A: switch it off."* Commit f3cf655, two live-path changes.
+- **(1) `xbow_pocket_after_tower: true -> false`** (config.yaml:1371). No more forward override to board y 0.391 when an enemy princess is down; the model's own cell stands. **REVERT: set back to true.**
+- **(a) Expectation stated BEFORE the run:** this assist fired **2x in 19 recorded runs**, so expect little/no visible difference from it alone -- said up front so a null is not misread, and so any overtime change is not misattributed to this switch.
+- **(2) LOGGING ONLY** (play.py:1208): `[student] TAP` lines now carry `ot=<0|1> ot_s=<s> enemy_alive=[..] mine_alive=[..]`. This closes the gap that made 3 of the owner's 4 complaints unmeasurable. Decisions untouched; `try/except` so logging can never kill the live loop. **Appended AFTER `wall=`** because `tap_audit.py`'s regex ends there -- **verified**: old/new lines parse to identical groups.
+- **(a) Verified before handing over a live command:** config parses and reads False; play.py compiles; **full suite 1516 passed / 21 skipped / 1 failed**. The one failure (`test_xbow_into_push.py`, `0.5625 >= env.xbow_front 0.625`) is **PRE-EXISTING -- proven** by restoring the pre-edit config backup and re-running: it fails identically. `env.*` value, unrelated to the `play.*` edit. Not bundled; now owed.
+- Command delivered: `--student data\pipeline\s1_icebow_v6aug_s1.pt --student-gate-tau 0.27`, opp-elixir flags already on (1291/1297).
+- hogeq left ON (no X-Bow in that deck, assist inert).
+- **NOT established:** any live effect of either change -- that is what the overnight run is for. The cause of forward-overtime play is still unknown, but is now auditable for the first time.
