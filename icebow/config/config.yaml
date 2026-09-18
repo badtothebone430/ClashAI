@@ -1368,8 +1368,13 @@ play:
                                  # (greyed = unaffordable, or an empty slot); a card read in two slots is never tapped. null disables the grey half.
   xbow_forward_board_y: 0.58     # L67ac X1: the live X-Bow assists treat a bow as OFFENSIVE only forward of this BOARD depth
                                  # (pros place 6.5% of X-Bows forward of it); env.xbow_defense_front stays the train-rl band.
-  xbow_pocket_after_tower: true  # L67ae X2: once an enemy princess is down, an X-Bow goes to that tower's POCKET (pros: 25% forward
-                                 # after a tower falls vs 5-8% before, 76% in the dead lane); false = X1's always-defensive X-Bow.
+  xbow_pocket_after_tower: false # OWNER RULING 2026-09-18 (L67by): switched OFF. "the pro derived play clearly does not
+                                 # apply at 10,000 trophies". Owner wants to watch overtime with it off, then make targeted
+                                 # fixes. false = X1's always-defensive X-Bow: the model's own cell stands, no forward override.
+                                 # REVERT: set back to true (nothing else changed). Measured L67bx: this assist fired only
+                                 # 2x across all 19 recorded runs, so expect little or no visible difference on its own.
+                                 # L67ae X2, why it was on: once an enemy princess is down, an X-Bow goes to that tower's
+                                 # POCKET (pros: 25% forward after a tower falls vs 5-8% before, 76% in the dead lane).
   xbow_pocket_board_y: 0.391     # L67ae X2: pocket depth (pro median for forward X-Bows in a dead tower's lane)
 
 # --- Hero Ice Wizard ability: Frosty Fella (L67ag, owner rulings 2026-09-12; HANDOFF 5cs.99 AL/AM) ---

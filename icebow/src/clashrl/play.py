@@ -1205,7 +1205,21 @@ def play(cfg) -> None:
             _student_tap.clear()
             _student_tap.update(t=time.time(), slot=int(slot), card=vision.deck_keys[card_id], elixir=float(elixir),
                                 before=_tray_names(hand_ids))
-            print(f"[student] TAP slot {int(slot)} {vision.deck_keys[card_id]} cell {cell} wall={_wall()}", flush=True)
+            # L67by (LOGGING ONLY, owner 2026-09-18): stamp MATCH STATE on every tap, so "how does it
+            # behave in OVERTIME" and "does it defend when AHEAD on towers" become answerable from the
+            # stdout log. Both questions were unauditable when the owner asked them -- overtime is not
+            # marked anywhere in the log today and tower state is tracked but never emitted.
+            # APPENDED AFTER wall= DELIBERATELY: tap_audit.py's regex ends at `wall=([\d:.]+)` and uses
+            # re.match, so fields added after it cannot break the existing parser (fields added BEFORE
+            # it would). Decisions are unchanged by this block -- it only prints.
+            try:
+                _st = (f" ot={int(bool(clock.overtime))} ot_s={float(clock.overtime_s):.0f}"
+                       f" enemy_alive={[int(b) for b in tower_tracker.enemy_alive]}"
+                       f" mine_alive={[int(b) for b in tower_tracker.mine_alive]}")
+            except Exception:              # a logging line must never be able to kill the live loop
+                _st = " ot=? enemy_alive=? mine_alive=?"
+            print(f"[student] TAP slot {int(slot)} {vision.deck_keys[card_id]} cell {cell} wall={_wall()}{_st}",
+                  flush=True)
         _cycle_tracker.record_play(card_id)        # a card left the hand -> it rotates to the queue back
         if _student is not None:                   # L67d: the student's `past` = my last 3 accepted plays
             _cx, _cy = actions.cell_center(gx, gy)
