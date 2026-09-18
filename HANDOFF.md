@@ -3772,6 +3772,25 @@ Both endpoints of the effect are therefore reproduced on BOTH slices before any 
 *What this does NOT establish.* Any live winrate. Whether the game screen is otherwise healthy -- the only capture on disk is of the browser, so nothing here says the Home screen would be detected correctly once unobstructed.
 
 
+**BQ. L67ce -- THE BOT PLAYS NOTHING, SILENTLY, IF THE IN-GAME DECK DOES NOT MATCH THE CONFIGURED DECK -- and an `IN_MATCH`-based health check does not catch it.** Diagnosed 2026-09-18 18:08 after a run produced five "matches" in seven minutes with impossible scorelines.
+
+***The symptom (a).*** Five ledger rows in ~7 minutes, durations **51 / 38 / 128 / 85 / 63 s**, outcomes `LOSS 0-1`, `LOSS 0-1`, `LOSS 0-1`, `LOSS 0-2`, `LOSS 0-1`. None of those end a Clash Royale match -- one tower down does not end a game, and 38 s cannot three-crown from full HP. Decisive counter: **`taps=0`, `waits=0` across all five**, where five real matches should produce hundreds of decisions.
+
+***The cause (a).*** `run.py diag` -> `data/diag_state.png` shows a **real match in progress** (1:30 left, opponent "ENZO PRO" at 10000 trophies, enemy push mid-board) -- but the tap hand holds **Fireball (4), a 1-cost, a 6-cost and a 3-cost**, none of them icebow cards. The account's active deck was not the configured deck. `recognize_hand` therefore matches nothing, `act_in_match` early-returns before the student ever decides (`play.py:801`), and the bot stands still while a real opponent dismantles it.
+
+***The configured deck (a), from `load_deck('icebow').cards` -- the same loader the student uses:*** `tornado, tesla_evo, ice_wizard, x_bow, rocket, knight_evo, the_log, skeletons`. **Two are EVOLUTIONS** -- Evolution Tesla and Evolution Knight. Plain Tesla or plain Knight will not match the templates.
+
+***The verification trap, and I walked straight into it.*** My 6-minute health check asserted `IN_MATCH > 0` and printed **"PLAYING OK"**. `IN_MATCH` was genuinely fine -- the bot *was* in matches. **The health check must assert `taps > 0`, not `IN_MATCH > 0`.** A deck mismatch produces a perfectly healthy-looking state machine driving a policy that never acts.
+
+*A correction I owe the record.* I first called these five rows "fabricated". **They are not.** They are **real match losses** -- the bot genuinely lost, because it played nothing. They are invalid as a measurement of the *policy* (it never acted), not invalid as match outcomes. Quarantined to `live_matches_20260918_180120.jsonl.INVALID` so they cannot pool into the winrate; the reasoning in the first commit message was wrong even though the action was right.
+
+*Valid data unaffected.* 11 rows remain across two sessions at `s1_icebow_v6aug_s1.pt` / tau 0.27 -- 9 from 01:13-01:40 and 2 from 17:35-17:42. Run 1 logged 261 taps of `skeletons`, `the_log`, `tornado`, `x_bow`, `tesla`, confirming it was genuinely on-deck.
+
+***PRE-FLIGHT, now two checks, both cheap.*** (1) `python run.py diag` and **look** at `data/diag_state.png` -- confirm it shows the real game, not another window (BP). (2) After launch, confirm **`taps > 0`** within the first few minutes -- `IN_MATCH > 0` is not sufficient. Either check alone would have saved a session; together they cover both known silent-failure modes.
+
+*What this does NOT establish.* Why the active deck changed between 17:42 and 18:01. Whether the deck can be verified programmatically before launch -- `vision.deck_keys` vs the tray read would be the obvious check and is **not implemented**; `play.py:365-369` warns on a checkpoint/deck mismatch but not on a *tray* mismatch.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
