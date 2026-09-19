@@ -3808,6 +3808,34 @@ Both endpoints of the effect are therefore reproduced on BOTH slices before any 
 *What this does NOT establish.* Whether the policy plays *well* -- 26 taps in one partial match says the pipeline works, nothing about quality. No live winrate; still never measured. Whether any earlier conclusion in this session rested on the same wrong-file grep beyond the two identified here.
 
 
+**BS. L67cg -- THE FIRST LIVE WINRATE EVER MEASURED IN THIS PROJECT: 35.1% over 37 matches (95% CI 21.8-51.2%). The owner's bar of 50% is not reached, and the engine-to-live transfer gap is now measured rather than asserted.** 2026-09-18, two sessions run by the owner (19:08, 19:41) pooled with two earlier ones, all on `s1_icebow_v6aug_s1.pt` at tau 0.27.
+
+***The number (a).*** **37 matches, 13W-22L-2D = 35.1%, Wilson 95% CI [21.8%, 51.2%].** Excluding the single 0-0 finish this instrument cannot resolve: 36.1% (CI 22.5-52.4%). Median match 183 s, 2.02 h of play, crowns **23 for / 40 against**.
+
+| session | n | record | rate |
+|---|---|---|---|
+| 011324 | 9 | 3W-6L | 33.3% |
+| 173530 | 2 | 1W-1L | (too small) |
+| 190851 (owner) | 8 | 3W-5L | 37.5% |
+| 194128 (owner) | 18 | 6W-10L-2D | 33.3% |
+
+**No single session drives the result** -- the three meaningful ones land at 33.3 / 37.5 / 33.3. There is no heterogeneity to explain away, which is the precondition for trusting a pooled figure.
+
+***Against the owner's bar: NOT reached (a).*** The interval's upper edge touches 51.2%, so 50% is not formally excluded at n=37 -- but the point estimate is 35% and three independent sessions concentrate there. Reading the CI edge against the weight of the data would be reporting the number one wants.
+
+***The engine-to-live gap, measured for the first time (a).*** This same checkpoint at this same tau scored **74% against engine ghosts** (§BI / `score_attrib_e2_v6aug_s1_tau027`). Live: **35.1%**. A **~39-point gap.** The engine figure is separately known to be inflated by a measured artifact: 29% of engine matches outlive the scripted opponent and 27 of those 29 are wins (§BM). This is the quantitative form of the owner's standing objection that engine numbers do not translate.
+
+***The sharpest behavioural finding (a).*** **21 of the owner's 26 matches went to overtime (81%).** Overtime means neither side destroyed a tower in three full minutes of regulation. With crowns 23 for / 40 against and a median match of 183 s, the profile is a bot that **defends competently and almost never closes**. That is far more specific than "it plays badly", and it points at the win condition -- consistent with the X-Bow placement entropy of 0.62-1.97 bits measured in §BM, where the deck's win condition is the one degenerate card.
+
+*Instrument validation (a).* **Integrity verified per session, not assumed:** 190851 = 8 rows / 8 `IN_MATCH` / 8 `[match]`; 194128 = 18 rows / 19 `IN_MATCH`, the 19th match being cut off mid-play when the owner stopped the run (last log line `20:43:59 state: IN_MATCH`, process gone by 20:47). **3 of 37 matches were 3-crown finishes recovered by `king_trending_down`** -- without it they would have scored 1-0 or 2-0 instead of 0-3.
+
+*How these rows were distinguished from the invalid ones (a).* Ten rows from the 18:01 and 18:40 runs are quarantined as `.INVALID` (bot in matches but never playing). The discriminator, established empirically: zero-play matches ran **38-128 s ending 0-1/0-2 with `crowns_for` pinned at 0 and no draws**; these sessions have **median 190 s / 183 s, `crowns_for` reaching 1 and 2, and 2 draws**. One short match in each session, not a pattern.
+
+***What is NOT available, and it matters (b).*** **No behaviour counters for the owner's sessions** -- plays/min, >10 s pause share, `[assist] XBOW dead-lane` firings, rocket usage. Those print only to stdout and the sessions were run without redirect. **So this 35% cannot be connected to any of the owner's four behaviour complaints.** Fix for next time is one shell token: `> run.log 2>&1`. Note also that `score_live_baseline.py` will silently compute its integrity check and behaviour counters from whatever `live_baseline_*.log` files exist -- i.e. from OTHER sessions -- so only its winrate block is trustworthy when a session was run without redirect.
+
+*What this does NOT establish.* Whether 35% is the ceiling of this checkpoint or of this pipeline. Whether the trophy band shifted during collection (no trophy reader exists, so the winrate is not binned by opponent strength and ladder matchmaking pushes every player toward 50% over time). Anything about RL, velocity, or the gate. To settle the 50% bar needs ~200 matches for +-7 pp -- about 12 h at the ~17 matches/h these sessions achieved.
+
+
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
 
 **A. Option B, the 3-seed result (a), `s1_v6aug/eval_v3val_icebow_v6aug.out` + `eval_v3degraded_*`.** Augmented set = 622,923 rows (339,192 clean + 283,731 degraded TRAIN rows; val rows clean, so checkpoint selection is v6lat's own rule).
