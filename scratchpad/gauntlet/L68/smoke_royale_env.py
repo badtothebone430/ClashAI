@@ -33,8 +33,11 @@ facts["start_tick"], facts["start_elixir"] = st.tick, st.players[0].elixir_milli
 for t in (89, 90):
     core.reset(0, MatchSetup(decks=[deck, deck], shuffle=ShuffleMode.NONE))
     core.step([], t)
-    (r,) = core.step([DeployCommand(0, 1, 9 * 18000, 10 * 18000)], 0)
-    facts[f"deploy_at_tick_{t}"] = DeployStatus(r.status).name
+    try:   # RoyaleSim f046df9 refuses with TOO_EARLY, which RoyaleGym 60529df's status map lacks -> RuntimeError
+        (r,) = core.step([DeployCommand(0, 1, 9 * 18000, 10 * 18000)], 0)
+        facts[f"deploy_at_tick_{t}"] = DeployStatus(r.status).name
+    except RuntimeError as exc:
+        facts[f"deploy_at_tick_{t}"] = f"raised: {exc}"
 facts["tick_after_zero_step"] = core.state().tick
 facts["overtime_ticks"] = core.state().overtime_ticks
 print(json.dumps(facts))
