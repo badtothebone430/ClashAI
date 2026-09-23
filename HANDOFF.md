@@ -22,7 +22,7 @@ exists, what is running, what is broken, what was fixed and how it was measured.
 > If a change is too small to warrant a ledger row, it is still worth a line — err toward writing
 > it down.
 
-Last updated: **2026-09-05 22:3x UTC**, branch `main`.
+Last updated: **2026-09-23** (§BT RoyaleGym), branch `main`.
 
 ### Where the project stands (read this, then §6 / §7 / §8)
 
@@ -160,6 +160,8 @@ cd C:\Users\benpe\ClashBot\hogeq
 ---
 
 ## 3. What is running RIGHT NOW
+
+**2026-09-23 -- ROYALEGYM (friend's Rust engine) SET UP AS AN RL LAYER (§BT, L68a): adapter `pipeline/royale_env.py` runs S1 + the live rule unchanged via `e1_eval --engine royale`; three silent harness breakers found and fixed (x18 units, deal order, 120 s overtime -- local patch); only 71/293 held-out matchups load even once Tornado lands; policy, not engine, is the speed bottleneck (16 s/match). Ranking check v6lat vs v6aug RUNNING, hardware_bench queued.**
 
 **2026-09-08 18:0x UTC -- THE LIVE DEFECT IS NAMED AND HALF-FIXED (§5cs.98): the gate survives real detector input (live .248-.325 vs engine .294-.298) but PLACEMENT COLLAPSES to the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts) with no jitter (same-cell 61.4% vs 38.7%). Ablation: MISSING values do it (unit HP, exact/opp elixir, king HP), while spell tokens / unknown sides / low confidence do NOTHING -- the spell-token hypothesis of 5cs.95 and 5cs.97 is CONTRADICTED. Against pro labels, supplying beats flagging (blank_both 18.78 / 52.11 -> fill_both 20.15 / 63.25), so opp_elixir + king HP + unit HP are now wired live (top-1 share 0.411 -> 0.322 on real frames). Option B graded: clean 21.56 +- 0.07, degraded 19.45 +- 0.05, but the degraded gain is circular and its seed 0 is a 13-epoch crashed run. blank_both sits 2.19 pp under clean, NOT degrade()'s 4.2 pp.**
 
@@ -3834,6 +3836,23 @@ Both endpoints of the effect are therefore reproduced on BOTH slices before any 
 ***What is NOT available, and it matters (b).*** **No behaviour counters for the owner's sessions** -- plays/min, >10 s pause share, `[assist] XBOW dead-lane` firings, rocket usage. Those print only to stdout and the sessions were run without redirect. **So this 35% cannot be connected to any of the owner's four behaviour complaints.** Fix for next time is one shell token: `> run.log 2>&1`. Note also that `score_live_baseline.py` will silently compute its integrity check and behaviour counters from whatever `live_baseline_*.log` files exist -- i.e. from OTHER sessions -- so only its winrate block is trustworthy when a session was run without redirect.
 
 *What this does NOT establish.* Whether 35% is the ceiling of this checkpoint or of this pipeline. Whether the trophy band shifted during collection (no trophy reader exists, so the winrate is not binned by opponent strength and ladder matchmaking pushes every player toward 50% over time). Anything about RL, velocity, or the gate. To settle the 50% bar needs ~200 matches for +-7 pp -- about 12 h at the ~17 matches/h these sessions achieved.
+
+**BT. L68a -- ROYALEGYM SET UP AS AN RL LAYER ON TOP OF IL (owner 2026-09-23), and the adapter's first measurements.** Owner: a friend's RoyaleGym (github.com/RoyaleGym: RoyaleSim Rust engine, RoyaleGym envs, RoyaleLearn PPO/self-play, RoyaleViser) is "much faster"; reattempt RL for icebow in it. Owner rulings: Rust install approved; RL is an ADDITIONAL layer on the IL framework, initialised from **v6aug_s1**; Tornado / evolutions / heroes are on the friend's roadmap (Tornado in progress) -- do not work on them.
+
+*Setup (a).* Clones in `research/ext/Royale/` (gitignored; RoyaleSim 4281176, RoyaleGym 377f6f3, RoyaleViser ceefc5d, RoyaleLearn 062800c), OWN venv `research/ext/Royale/.venv` (Py 3.13, torch 2.11.0+cu128, royalesim built with maturin; build digest d872d792711934c2). Rust 1.x via winget rustup + VS 2022 Build Tools (VCTools) -- needed for the MSVC linker. **Local patch to the clone: `match.OVERTIME_S` 60 -> 120** (original at `data/calibration.json.orig`); calibration is compiled in, so changing it means `maturin develop --release` (~5 min).
+
+*Adapter (a).* `pipeline/royale_env.py` = `RoyalePoolEnv`, the `PoolV1Env` interface on RoyaleSim; `pipeline/e1_eval.py --engine royale --subs Tornado=Arrows` runs the S1 policy + live rule on it unchanged (54 e1 tests OK). Three facts found by the smoke test (`scratchpad/gauntlet/L68/smoke_royale_env.py`), each of which silently breaks the ghost harness:
+1. **RoyaleSim is 18,000 units/tile, the pool 1,000** (arena 324,000 x 576,000; kings (162000, 54000) = tile (9, 3)). Unscaled, 10-27 ghost plays per match were refused `no_deploy`. Side 0 = Blue at low y in both.
+2. **The pool's `final` deck order is NOT a hand-first-4 deal** -- it reproduces the opening hand only under the real engine's seeded deal. `deal_order()` searches 70 hands x 24 queues for a deal consistent with each side's recorded plays (RoyaleSim's cycle = the real game's, measured). Ghost refusals 30% -> **0.1% (1/757)**.
+3. **Overtime: RoyaleSim ships 60 s (2018 locations.csv); the 2026 corpus runs to 5,979 ticks = 120 s, 1,121/1,810 pool matches (62%) past 4,800.** Fixed by the local patch. Also: RoyaleSim ACCEPTS deploys before tick 90 (the real engine refuses; harness starts at 90, earliest pool play 102, so no effect here). Report all three to the friend.
+
+*Coverage (a).* `L68/deck_coverage.py`: RoyaleSim loads 100 of 144 cards. Held-out 293: our deck loads in 0/293 (Tornado); **with Tornado, 71/293 (24.2%) matchups fully load**. Top opponent blockers: BarbLog 93, Tornado 47, Lightning 40, Ghost 33, Miner 30, Graveyard 27. Evo/hero forms run as base on both sides (our Tesla/Knight evo always). With Tornado->Arrows: 58 playable (222 card-blocked, 13 no consistent deal).
+
+*Speed (a).* Ghost-only match 0.126 s. **With the S1 policy in the loop 16.2 s/match (CPU, 2 threads) / 10-13 s (CUDA) vs ~21 s real engine: the policy's per-decision Python path is now the bottleneck, not the engine.** RL at scale needs batched forwards across envs.
+
+*RUNNING (b).* Ranking check `L68/rank/run.sh` (8 shards): v6lat_s0 vs v6aug_s1 on the playable held-out ghosts, live rule, tau 0.27; score with `L68/rank/score.py` (paired vs `L67/e1/baseline_k0` and `attrib/e2_v6aug_s1_tau027`, real engine 52% vs 74% on 0:100). Then the friend's `hardware_bench.py` (owner request) -> `L68/hardware_bench.json`. This machine: RTX 5050 Laptop 8 GB (cc 12.0), 32 GB RAM, 16 threads = the gap between RoyaleLearn's `laptop` and `workstation` profiles.
+
+*Plan (b), owner-agreed in outline.* PPO from v6aug_s1 with a KL leash whose budget grows only as REAL-ENGINE held-out winrate gains are confirmed; pro agreement is a collapse TRIPWIRE (agreement down + winrate flat = stop), not a hard floor -- a hard floor forbids ever beating pros. Nothing trained with Tornado->Arrows may go live.
 
 
 ### §5cs.98 -- L67e+f (2026-09-08 06:00-18:00 UTC): **OPTION B GRADED (3 seeds: clean 21.56 +- 0.07, degraded 19.45 +- 0.05) BUT ITS GAIN IS AGAINST A CORRUPTION MODEL WE NOW KNOW IS WRONG. Three label-free live measurements instead: the GATE survives real detector input (live .248-.325 vs engine .294-.298), PLACEMENT COLLAPSES toward the prior (top-1 cell share 0.25 vs 0.07 at matched unit counts), and nothing JITTERS (same-cell 61.4% live vs 38.7% engine -- the collapse seen twice, not a second defect). Ablation names the cause: MISSING VALUES (unit HP, exact/opponent elixir, king HP), not noisy ones -- spell tokens, unknown team tags and low confidence each do NOTHING. Against pro labels, SUPPLYING beats FLAGGING (blank_both 18.78 exact cell / 52.11 card -> fill_both 20.15 / 63.25), so the fill is now wired live and verified (live top-1 share 0.411 -> 0.322)**
