@@ -85,10 +85,12 @@ Do not kill the learner mid-update unless it hangs. The learner writes `pid.json
 (one actor PID per line, rewritten on every actor restart) in the run dir and deletes both on a clean exit. An idle
 actor exits on its own within ~30 s of the learner going away; an actor in the middle of a job finishes that job first
 (bounded only by the job's own length), then sees the learner is gone and exits WITHOUT sending its results (its result
-queue never blocks process exit). If the learner was killed hard, stop the actors now instead of waiting (PowerShell,
-from the repo root):
+queue never blocks process exit; measured L68: a mid-job actor exited ~91 s after a hard learner kill). If the learner
+was killed hard, stop the actors now instead of waiting (PowerShell, from the repo root). The file outlives a hard kill
+and Windows reuses PIDs, so the one-liner only stops a PID that is STILL a python `multiprocessing` child -- never an
+unrelated process that inherited the number:
 ```
-Get-Content scratchpad/gauntlet/L68/rl/<name>/actors.pid | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+Get-Content scratchpad/gauntlet/L68/rl/<name>/actors.pid | ForEach-Object { $p = Get-CimInstance Win32_Process -Filter "ProcessId = $_"; if ($p -and $p.Name -eq 'python.exe' -and $p.CommandLine -match 'multiprocessing') { Stop-Process -Id $_ -Force } }
 ```
 Verify nothing is left (actors show up as `multiprocessing.spawn` children, not by the module name):
 ```
