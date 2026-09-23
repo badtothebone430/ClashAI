@@ -77,11 +77,24 @@ Create `scratchpad/gauntlet/L68/rl/<name>/STOP` (any content). The learner finis
 the same way with its reason on the STOP line (a non-finite loss/gradient/parameter logs `NON-FINITE at update N`,
 writes `<name>_crash_u{N}_*.pt` instead and leaves `_latest.pt` at the last good update, then the same STOP line and
 exit 0). If a crash left `<name>_u{NNNN}.pt` but not the matching `_latest.pt`, `--resume` re-runs that update and
-keeps the existing numbered file (logged `already exists ... kept`). Do not kill the learner mid-update unless it hangs; if you must, kill the learner
-PID from `pid.json` and then the actor PIDs. An idle actor exits on its own within ~30 s of the learner going away,
-but an actor in the middle of a job finishes that job first (bounded by the job's length, at most `actor_timeout_s`
-3,600 s) -- kill it by PID if you do not want to wait.
-Verify with `Get-CimInstance Win32_Process -Filter "name='python.exe'" | ? CommandLine -match rl_royale`.
+keeps the existing numbered file (logged `already exists ... kept`). That kept `u{NNNN}` holds the ABORTED attempt's
+weights: it is not an ancestor of `_latest.pt` or of any later checkpoint (the re-run of that update produced different
+weights that were only written to `_latest.pt`), so do not treat it as a point on the run's lineage.
+
+Do not kill the learner mid-update unless it hangs. The learner writes `pid.json` (learner + actors) and `actors.pid`
+(one actor PID per line, rewritten on every actor restart) in the run dir and deletes both on a clean exit. An idle
+actor exits on its own within ~30 s of the learner going away; an actor in the middle of a job finishes that job first
+(bounded only by the job's own length), then sees the learner is gone and exits WITHOUT sending its results (its result
+queue never blocks process exit). If the learner was killed hard, stop the actors now instead of waiting (PowerShell,
+from the repo root):
+```
+Get-Content scratchpad/gauntlet/L68/rl/<name>/actors.pid | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+```
+Verify nothing is left (actors show up as `multiprocessing.spawn` children, not by the module name):
+```
+Get-CimInstance Win32_Process -Filter "name='python.exe'" | Where-Object { $_.CommandLine -match 'rl_royale|multiprocessing' } | Select-Object ProcessId, CommandLine
+```
+(other projects' multiprocessing children match the second pattern too -- compare with `actors.pid` before killing).
 
 ## 5. Resume
 Delete the STOP file first (resume refuses while it exists), then

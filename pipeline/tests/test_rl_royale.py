@@ -14,6 +14,7 @@ import copy
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -440,12 +441,13 @@ class TestScreenNoPairs(unittest.TestCase):
         self.assertEqual(sc["paired"], 0)
         self.assertIsNone(sc["delta_pp"]); self.assertIsNone(sc["ci_hi_pp"]); self.assertIsNone(sc["ci_lo_pp"])
         g = RL.Guards(CFG)
-        g.screen(3.0, 9.0)
+        g.screen(-3.0, 9.0)
         self.assertIsNone(g.screen(sc["delta_pp"], sc["ci_hi_pp"]))
-        self.assertEqual(g.s["latest_screen_delta_pp"], 3.0)             # the no-pair screen did not overwrite it
+        self.assertIsNone(g.s["latest_screen_delta_pp"])            # the stale -3.0 is dropped, not carried forward
         pa = {"cell_half_top1": 0.10, "card_top1": 0.64, "gate_bal_acc": 0.76}
         init = {"cell_half_top1": 0.2073, "card_top1": 0.6394, "gate_bal_acc": 0.7636}
-        self.assertIsNone(RL.tripwire_reason(pa, init, RL.Guards(CFG).s["latest_screen_delta_pp"], CFG))
+        self.assertIsNotNone(RL.tripwire_reason(pa, init, -3.0, CFG))    # the stale delta WOULD have tripped it
+        self.assertIsNone(RL.tripwire_reason(pa, init, g.s["latest_screen_delta_pp"], CFG))
 
 
 # ------------------------------------------------------------------------------------------------------
@@ -542,6 +544,41 @@ class TestOneUpdate(unittest.TestCase):
         self.assertEqual(numbered.read_bytes(), b"FIRST-ATTEMPT")
         self.assertTrue((L.ck_dir / "unit_latest.pt").exists())
         self.assertTrue(any("already exists" in m for m in L.log.lines))
+
+
+# ------------------------------------------------------------------------------------------------------
+def _big_put_child(q, ev, nbytes):
+    """An actor-like spawn child: the actor's queue setup (``rl_royale.actor_sender``), one large put that nobody will
+    ever read, then return -- the process must still exit promptly."""
+    send = RL.actor_sender(q)
+    send(("done", 0, 0, b"x" * nbytes))
+    ev.set()
+
+
+class TestActorExitWithUnreadPut(unittest.TestCase):
+    """Verifier F1: a spawn child that put a multi-MB payload on an mp.Queue nobody reads must not hang at exit."""
+
+    def test_exits_promptly(self):
+        import multiprocessing as mp
+        try:
+            ctx = mp.get_context("spawn")
+        except ValueError:
+            self.skipTest("no spawn start method")
+        q, ev = ctx.Queue(), ctx.Event()
+        p = ctx.Process(target=_big_put_child, args=(q, ev, 5_000_000), daemon=True)
+        p.start()
+        try:
+            self.assertTrue(ev.wait(120), "child never reached its put (import too slow?)")
+            t0 = time.perf_counter()
+            p.join(10)
+            exit_s = time.perf_counter() - t0
+            self.assertFalse(p.is_alive(), "actor-like child hung at exit after an unread 5 MB put")
+            self.assertLess(exit_s, 10.0)
+            self.assertEqual(p.exitcode, 0)
+        finally:
+            if p.is_alive():
+                p.kill()
+                p.join(5)
 
 
 if __name__ == "__main__":
