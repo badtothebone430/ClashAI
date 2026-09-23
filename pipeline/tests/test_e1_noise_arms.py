@@ -892,11 +892,12 @@ class TestNoiseOffCli(unittest.TestCase):
         self.assertEqual(e1_eval.parse_noise_off(a.noise_off), Noise(recall=False, position=False))
 
     def test_obs_clean_path_never_calls_live_view(self):
-        """--obs clean's branch in run_match is `bs` unmodified regardless of --noise-off (module docstring
-        of e1_eval / EXPECTED OUTCOME item 5): verified structurally, since clean never reaches live_view."""
+        """--obs clean's branch is `bs` unmodified regardless of --noise-off (module docstring of e1_eval /
+        EXPECTED OUTCOME item 5): verified structurally, since clean never reaches live_view. The branch lives in
+        Match.prepare since L68 (run_match became a Match loop)."""
         import inspect
-        src = inspect.getsource(e1_eval.run_match)
-        self.assertIn('live_view(bs, rng_obs, deck, cfg["noise"]) if cfg["obs"] == "live" else bs', src)
+        src = inspect.getsource(e1_eval.Match.prepare)
+        self.assertIn('live_view(bs, self.rng_obs, self.deck, cfg["noise"]) if cfg["obs"] == "live" else bs', src)
 
 
 if __name__ == "__main__":
