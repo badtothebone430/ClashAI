@@ -15,8 +15,8 @@ icebow/.venv/Scripts/python.exe -m unittest pipeline.tests.test_rl_royale -v
 research/ext/Royale/.venv/Scripts/python.exe -m pipeline.rl_royale --config pipeline/rl_royale.yaml --run smoke_<date> --smoke
 ```
 E=4, G=2, 1 actor, 8 in flight, 2 updates, screen on 8 held-out entries, pro agreement on 1,000 VAL rows. It checks:
-u0000 reloads through `engine_play.load_model` with identical pro agreement; update 0 is on-policy (max |ratio-1| < 1e-3,
-KL < 1e-5 per head, else AssertionError = a bug); a fresh learner through `--resume` restores update / beta / optimizer
+u0000 reloads through `engine_play.load_model` with identical pro agreement; update 0 is on-policy (max |ratio-1| < 1e-4,
+KL < 1e-6 per head, else AssertionError = a bug); a fresh learner through `--resume` restores update / beta / optimizer
 / rng / guards. Last line `SMOKE PASS` (exit 0) or `SMOKE FAIL: <check>` (exit 1). Delete its two dirs afterwards
 (`scratchpad/gauntlet/L68/rl/smoke_<date>`, `icebow/data/bench/rl_royale/smoke_<date>`).
 
@@ -41,15 +41,19 @@ Checkpoints: `icebow/data/bench/rl_royale/<name>/` = `<name>_latest.pt` (every u
 | `kl_cell`, `beta_next` | kl_cell near `kl_target` 0.10; beta moving inside [0.03, 3] | the leash; beta at 3.0 with KL_cell > 0.5 = stop |
 | `kl_gate`, `kl_card` | small (< 0.1) | gate drift is the historical collapse channel |
 | `mixed_group_share` | > 0.3 | share of entries whose G rollouts disagree = the gradient's real sample size |
-| `entropy` vs `entropy_init` | same order | a head going deterministic |
+| `entropy` vs `entropy_init` | same order | a head going deterministic; stop = any head < `entropy_floor_frac` 0.5 x init's on the same rows, 2 in a row (E1 3.4) |
 | `clip_frac`, `ratio_mean` | clip_frac < ~0.2, ratio_mean ~1 | step size |
-| `first_minibatch.ratio_maxdev` | < 1e-3 every update | on-policy integrity (asserted at update 0) |
+| `first_minibatch.ratio_maxdev` | < 1e-4 every update (measured ~8e-6) | on-policy integrity (asserted at update 0) |
 | `screen.delta_pp`, `ci_lo_pp`/`ci_hi_pp`, `better`/`worse` | the signal; stop = delta <= -10 pp AND CI upper < 0 | held-out RoyaleSim, 58 entries x seeds 0,1,2, entry-clustered paired vs init (every `screen_every`) |
 | `proagree_delta_pp` | > -1 pp cell | tripwire: cell < -1 pp AND screen delta <= 0 = stop; hard stop -3 pp cell/card, -0.05 gate |
 | `outlived_win_share`, `low_delivered_win_share`, `ghost_refused_per_match` | near their update-0 values; refused EMA below `guards.ghost_refused_limit` = max(2x, +1.0) of update 0 (logged at update 0) | ghost-exploit guards (E1 4.2); `ghost_undelivered_per_match` is a monitor only |
 | `winrate` | descriptive only | train entries are revisited; never a verdict |
 | `visits_distinct`, `visits_max` | -- | pool revisits (299 entries) |
 | `wall_*`, `actor_s_per_match`, `*_gpu_peak_mb` | -- | throughput |
+
+NOT implemented (monitors you read by hand, not stop rules): E1 4.2.4 won-match length drift (+20 s flag) -- read
+`won_seconds_mean` against update 0; E1 4.2.5 per-ghost flip list -- the screen logs only `better`/`worse` counts, not
+which entries flipped.
 
 **Screen noise (measured L68, run noise_L68, 3 updates at the default config, KL_cell 0.002-0.006):** paired deltas
 -0.6 / +1.1 / +0.6 pp, 95% CI half-width ~6-8 pp (e.g. [-8.0, +7.5]), and 35-46 of the 174 (tag, k) pairs flip
@@ -70,9 +74,13 @@ owner decision, like kl_target.
 ## 4. Stop
 Create `scratchpad/gauntlet/L68/rl/<name>/STOP` (any content). The learner finishes the current update, saves
 `_latest.pt`, logs `STOP after update N: STOP file present`, closes the actors, exits 0. Every automatic stop rule ends
-the same way with its reason on the STOP line (a non-finite loss/parameter writes a crash save instead and leaves
-`_latest.pt` at the last good update). Do not kill the learner mid-update unless it hangs; if you must, kill the learner
-PID from `pid.json` and then the actor PIDs (actors also exit on their own within ~30 s once the learner is gone).
+the same way with its reason on the STOP line (a non-finite loss/gradient/parameter logs `NON-FINITE at update N`,
+writes `<name>_crash_u{N}_*.pt` instead and leaves `_latest.pt` at the last good update, then the same STOP line and
+exit 0). If a crash left `<name>_u{NNNN}.pt` but not the matching `_latest.pt`, `--resume` re-runs that update and
+keeps the existing numbered file (logged `already exists ... kept`). Do not kill the learner mid-update unless it hangs; if you must, kill the learner
+PID from `pid.json` and then the actor PIDs. An idle actor exits on its own within ~30 s of the learner going away,
+but an actor in the middle of a job finishes that job first (bounded by the job's length, at most `actor_timeout_s`
+3,600 s) -- kill it by PID if you do not want to wait.
 Verify with `Get-CimInstance Win32_Process -Filter "name='python.exe'" | ? CommandLine -match rl_royale`.
 
 ## 5. Resume
@@ -87,14 +95,11 @@ counters/EMAs, init baselines (pro agreement, init screen per tag). A changed co
 ## 6. Gate a checkpoint
 RoyaleSim held-out, 3 seeds (paired vs the init):
 ```
-icebow/.venv/Scripts/python.exe -m pipeline.rl_gate --commands --engine royale ^
-    --init-ckpt icebow/data/pipeline/s1_icebow_v6aug_s1.pt --cand-ckpt icebow/data/bench/rl_royale/<name>/<name>_u0050.pt ^
-    --out-root scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050
+icebow/.venv/Scripts/python.exe -m pipeline.rl_gate --commands --engine royale --init-ckpt icebow/data/pipeline/s1_icebow_v6aug_s1.pt --cand-ckpt icebow/data/bench/rl_royale/<name>/<name>_u0050.pt --out-root scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050
 ```
 run the two printed `e1_eval` lines, then
 ```
-icebow/.venv/Scripts/python.exe -m pipeline.rl_gate --init scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050/init ^
-    --cand scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050/cand --json scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050/report.json
+icebow/.venv/Scripts/python.exe -m pipeline.rl_gate --init scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050/init --cand scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050/cand --json scratchpad/gauntlet/L68/rl/<name>/gate_royale_u0050/report.json
 ```
 Real engine (the verdict that counts): same with `--engine real` (boot both engine slots first, ports 38031/38032; see
 HANDOFF / `e1/_boot.ps1`), four printed lines (init/cand x slot0/slot1). Pro agreement for criterion (ii) is not in

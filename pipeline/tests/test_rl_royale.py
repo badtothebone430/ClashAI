@@ -34,7 +34,8 @@ from pipeline.obs_contract import F as TOK_F, S as SC_S         # noqa: E402
 TAU, T = 0.27, 0.5
 CFG = {"stop_consecutive": 2, "plays_lo": 0.6, "plays_hi": 1.6, "kl_cell_stop": 0.5, "kl_gate_stop": 0.1,
        "beta_max": 3.0, "tripwire_cell_pp": 1.0, "hard_cell_pp": 3.0, "hard_card_pp": 3.0, "hard_gate_bal": 0.05,
-       "screen_stop_pp": -10.0, "ema_updates": 5, "outlived_pp": 15.0, "low_delivered_pp": 10.0, "ghost_refusal_x": 2.0}
+       "screen_stop_pp": -10.0, "ema_updates": 5, "outlived_pp": 15.0, "low_delivered_pp": 10.0, "ghost_refusal_x": 2.0,
+       "entropy_floor_frac": 0.5}
 
 
 def _tiny_model(seed: int):
@@ -403,6 +404,144 @@ class TestCheckpointRoundTrip(unittest.TestCase):
             self.assertTrue(torch.equal(s1[k]["exp_avg"], s2[k]["exp_avg"]))
         for a, b in zip(model.state_dict().values(), L2.model.state_dict().values()):
             self.assertTrue(torch.equal(a, b))
+
+
+# ------------------------------------------------------------------------------------------------------
+class TestEntropyStop(unittest.TestCase):
+    """E1 3.4: a head's entropy < entropy_floor_frac x the init's on the same rows, stop_consecutive updates."""
+
+    INIT = {"gate": 0.27, "card": 0.11, "cell": 1.8}
+
+    def test_fires_on_second_consecutive_for_that_head_only(self):
+        g = RL.Guards(CFG)
+        g.set_baselines({})
+        low_gate = {"gate": 0.10, "card": 0.10, "cell": 1.0}          # gate 0.10 < 0.135; card, cell above half
+        self.assertEqual(g.after_update({}, 0.3, 0.0, 0.0, ent=low_gate, ent_init=self.INIT), [])
+        out = g.after_update({}, 0.3, 0.0, 0.0, ent=low_gate, ent_init=self.INIT)
+        self.assertEqual(len(out), 1)
+        self.assertIn("gate entropy", out[0])
+
+    def test_recovery_resets_and_none_is_skipped(self):
+        g = RL.Guards(CFG)
+        g.set_baselines({})
+        low = {"gate": 0.27, "card": 0.11, "cell": 0.5}
+        g.after_update({}, 0.3, 0.0, 0.0, ent=low, ent_init=self.INIT)
+        self.assertEqual(g.after_update({}, 0.3, 0.0, 0.0, ent=self.INIT, ent_init=self.INIT), [])     # reset
+        self.assertEqual(g.after_update({}, 0.3, 0.0, 0.0, ent=low, ent_init=self.INIT), [])
+        none = {"gate": None, "card": None, "cell": None}
+        for _ in range(3):
+            self.assertEqual(g.after_update({}, 0.3, 0.0, 0.0, ent=none, ent_init=self.INIT), [])
+
+
+class TestScreenNoPairs(unittest.TestCase):
+    def test_no_pairs_is_none_and_not_a_screen(self):
+        res = [{"tag": "X", "k": 0, "outcome": "loss", "plays_attempted": 5, "seconds": 60.0}]
+        sc = RL.screen_score(res, {"Y:0": 1.0})
+        self.assertEqual(sc["paired"], 0)
+        self.assertIsNone(sc["delta_pp"]); self.assertIsNone(sc["ci_hi_pp"]); self.assertIsNone(sc["ci_lo_pp"])
+        g = RL.Guards(CFG)
+        g.screen(3.0, 9.0)
+        self.assertIsNone(g.screen(sc["delta_pp"], sc["ci_hi_pp"]))
+        self.assertEqual(g.s["latest_screen_delta_pp"], 3.0)             # the no-pair screen did not overwrite it
+        pa = {"cell_half_top1": 0.10, "card_top1": 0.64, "gate_bal_acc": 0.76}
+        init = {"cell_half_top1": 0.2073, "card_top1": 0.6394, "gate_bal_acc": 0.7636}
+        self.assertIsNone(RL.tripwire_reason(pa, init, RL.Guards(CFG).s["latest_screen_delta_pp"], CFG))
+
+
+# ------------------------------------------------------------------------------------------------------
+class _Log:
+    def __init__(self):
+        self.lines, self.recs = [], []
+
+    def __call__(self, m):
+        self.lines.append(m)
+
+    def json(self, r):
+        self.recs.append(r)
+
+
+def _monitor_fields(res: list[dict]) -> list[dict]:
+    """The result keys rollout_monitors reads, on the synthetic trajectories."""
+    for r in res:
+        n = int(r["traj"]["played"].sum())
+        r.update({"tag": f"t{r['entry_index']}", "seconds": 120.0, "plays_attempted": n, "plays_accepted": n,
+                  "card_mix_attempted": {}, "refuse_reasons": {}, "play_elixir": [], "stall_fired": 0,
+                  "ghost_delivered": 20, "ghost_refused": 0, "ghost_undelivered": 0, "won_after_script": False})
+    return res
+
+
+class TestOneUpdate(unittest.TestCase):
+    """``Learner.one_update`` offline (rollout stubbed with synthetic sampler trajectories): a normal update, the
+    non-finite path (stop reason, crash save, _latest untouched) and resume's already-existing numbered checkpoint."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = _tiny_model(6)
+        cls.results = _monitor_fields(_results(cls.model, [(0, 0, 30, "win"), (0, 1, 25, "loss"), (1, 0, 20, "win"),
+                                                           (1, 1, 28, "draw")], seed=13))
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="rl_royale_upd_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        orig_root, orig_mbl = RL.CKPT_ROOT, RL.minibatch_loss
+        RL.CKPT_ROOT = self.tmp / "ck"
+        self.addCleanup(setattr, RL, "CKPT_ROOT", orig_root)
+        self.addCleanup(setattr, RL, "minibatch_loss", orig_mbl)
+
+    def _learner(self) -> "RL.Learner":
+        model = copy.deepcopy(self.model)
+        L = RL.Learner.__new__(RL.Learner)
+        L.cfg = dict(CFG, init="x.pt", lr=1e-4, tau=TAU, T=T, adv_clip=2.0, minibatch=64, ppo_epochs=2, clip=0.2,
+                     grad_clip=0.5, kl_target=0.1, beta_min=0.03, beta_max=3.0, screen_every=1000,
+                     proagree_every=1000, save_every=1, max_updates=1)
+        L.run, L.dev, L.model, L.pool_sha = "unit", torch.device("cpu"), model, "sha"
+        L.ref = copy.deepcopy(model).eval()
+        for p in L.ref.parameters():
+            p.requires_grad_(False)
+        L.init_meta = {"args": {"d": 16, "layers": 1, "grid": "lattice"}, "deck": "icebow", "epoch": 12, "n_params": 1}
+        L.opt = torch.optim.Adam(model.parameters(), lr=1e-4)
+        L.update, L.beta, L.rng, L.visits, L.train = 0, 0.3, np.random.default_rng(0), [0, 0], [None, None]
+        L.base, L.guards, L.latest_pa = {"init_screen": {}}, RL.Guards(L.cfg), None
+        L.run_dir, L.ck_dir = self.tmp / "run", self.tmp / "ck" / "unit"
+        L.run_dir.mkdir(parents=True); L.ck_dir.mkdir(parents=True)
+        L.log = _Log()
+        L.rollout = lambda u: (list(self.results), {"picked": [0, 1], "actors": {}, "skipped": 0})
+        return L
+
+    def test_normal_update(self):
+        L = self._learner()
+        rec, reasons, crash = L.one_update(0)                   # includes the update-0 on-policy assertion (1e-4/1e-6)
+        self.assertFalse(crash)
+        self.assertEqual(L.update, 1)
+        self.assertLess(rec["first_minibatch"]["ratio_maxdev"], RL.ASSERT_RATIO)
+        self.assertTrue((L.ck_dir / "unit_latest.pt").exists())
+        self.assertTrue((L.ck_dir / "unit_u0001.pt").exists())
+
+    def test_nonfinite_stops_and_keeps_latest(self):
+        L = self._learner()
+        latest = L.ck_dir / "unit_latest.pt"
+        latest.write_bytes(b"LAST-GOOD")
+        real = RL.minibatch_loss
+        RL.minibatch_loss = (lambda *a, **k: (lambda ls: (ls[0] * float("nan"), ls[1]))(real(*a, **k)))
+        code, why = L.loop()
+        self.assertEqual(code, 0)
+        self.assertIn("non-finite loss", why)
+        self.assertEqual(latest.read_bytes(), b"LAST-GOOD")        # _latest untouched
+        self.assertEqual(len(list(L.ck_dir.glob("unit_crash_u0000_*.pt"))), 1)
+        self.assertFalse((L.ck_dir / "unit_u0001.pt").exists())
+        self.assertEqual(L.update, 0)                               # the crashed update is not counted
+        self.assertTrue(any(m.startswith("STOP after update 0: non-finite loss") for m in L.log.lines), L.log.lines)
+        self.assertIn("non-finite loss", L.log.recs[-1]["stop"][0])
+
+    def test_existing_numbered_checkpoint_is_kept(self):
+        L = self._learner()
+        numbered = L.ck_dir / "unit_u0001.pt"
+        numbered.write_bytes(b"FIRST-ATTEMPT")                      # crash after it, before _latest; resume re-runs
+        rec, reasons, crash = L.one_update(0)
+        self.assertFalse(crash)
+        self.assertEqual(numbered.read_bytes(), b"FIRST-ATTEMPT")
+        self.assertTrue((L.ck_dir / "unit_latest.pt").exists())
+        self.assertTrue(any("already exists" in m for m in L.log.lines))
 
 
 if __name__ == "__main__":
